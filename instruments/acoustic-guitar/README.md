@@ -4,6 +4,13 @@ A SID chip instrument patch approximating the timbre of an acoustic guitar
 playing E4 forte (~329.63 Hz). Optimised via CMA-ES spectral matching
 against a Philharmonia Orchestra sample.
 
+## Source and Target
+
+| | |
+|---|---|
+| **Source instrument** | Philharmonia Orchestra, acoustic guitar E4 forte (CC-BY-SA 3.0) |
+| **Target SID model** | MOS 6581 |
+
 ## Tags
 
 `acoustic-guitar`, `plucked`, `string`, `E4`, `forte`

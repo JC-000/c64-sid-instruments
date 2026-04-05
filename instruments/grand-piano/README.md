@@ -3,6 +3,13 @@
 A Commodore 64 SID chip instrument approximating the timbre of a grand piano,
 optimized against the Salamander Grand Piano V3 C4 fortissimo sample.
 
+## Source and Target
+
+| | |
+|---|---|
+| **Source instrument** | Salamander Grand Piano V3, C4 fortissimo (CC-BY 3.0, Alexander Holm) |
+| **Target SID model** | MOS 6581 |
+
 ## Tags
 
 `piano`, `keyboard`, `percussive`, `pulse`, `lowpass`

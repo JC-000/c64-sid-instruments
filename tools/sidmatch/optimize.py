@@ -175,6 +175,10 @@ def sid_params_from_dict(d: dict) -> SidParams:
         kw["pw_table"] = [tuple(t) for t in kw["pw_table"]]
     if kw.get("wavetable"):
         kw["wavetable"] = [tuple(t) for t in kw["wavetable"]]
+    # Strip keys that are not SidParams fields (e.g. fitness_score, version).
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(SidParams)}
+    kw = {k: v for k, v in kw.items() if k in valid_fields}
     return SidParams(**kw)
 
 
@@ -234,8 +238,9 @@ def _worker_eval(x_list: List[float]) -> float:
     assert _WORKER_REF_FV is not None and _WORKER_FIXED_KWARGS is not None
     x = np.asarray(x_list, dtype=np.float64)
     params = decode_params(x, _WORKER_FIXED_KWARGS)
+    chip_model = _WORKER_FIXED_KWARGS.get("chip_model")
     try:
-        audio = render_pyresid(params, sample_rate=CANONICAL_SR)
+        audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
         fv = extract(audio, CANONICAL_SR)
         return float(distance(_WORKER_REF_FV, fv, weights=_WORKER_WEIGHTS))
     except Exception as e:
@@ -251,8 +256,9 @@ def _eval_single(
 ) -> float:
     """In-process evaluation (used when n_workers=1)."""
     params = decode_params(x, fixed_kwargs)
+    chip_model = fixed_kwargs.get("chip_model")
     try:
-        audio = render_pyresid(params, sample_rate=CANONICAL_SR)
+        audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
         fv = extract(audio, CANONICAL_SR)
         return float(distance(ref_fv, fv, weights=weights))
     except Exception:

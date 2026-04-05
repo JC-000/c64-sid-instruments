@@ -33,6 +33,8 @@
 ; @meta wavetable=
 ; @meta fitness_score=0.4369
 ; @meta version=1
+; @meta chip_model=6581
+; @meta source_instrument=Salamander Grand Piano V3, C4 fortissimo (CC-BY 3.0, Alexander Holm)
 
 grand_piano_adsr:
     !byte $bb           ; attack<<4 | decay
