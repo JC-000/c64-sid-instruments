@@ -27,3 +27,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# sidmatch working output
+work/
+.pytest_cache/
