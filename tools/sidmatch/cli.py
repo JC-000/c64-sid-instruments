@@ -27,10 +27,12 @@ from .optimize import (
     Optimizer,
     OptimizerResult,
     sid_params_to_dict,
+    sid_params_from_dict,
 )
 from .grid_search import grid_search
-from .render import render_pyresid
+from .render import render_pyresid, SidParams
 from .features import CANONICAL_SR
+from .encoders.raw_asm import encode_raw_asm
 
 
 def _save_fitness_plot(history, out_path: Path) -> None:
@@ -196,6 +198,138 @@ def cmd_match(args: argparse.Namespace) -> int:
     return 0
 
 
+_README_TEMPLATE = """\
+# {title} (SID Instrument)
+
+{description}
+
+## Tags
+
+{tags}
+
+## Winning Parameters
+
+| Parameter | Value |
+|---|---|
+{param_rows}
+
+## Fitness
+
+- **Fitness score:** {fitness_score:.4f}
+- **Version:** {version}
+
+## Files
+
+| File | Description |
+|---|---|
+| `params.json` | Machine-readable SID parameters |
+| `raw.asm` | ACME-includable assembly tables |
+| `goattracker.ins` | GoatTracker 2.x instrument binary |
+| `README.md` | This file |
+"""
+
+
+def _instrument_readme(
+    name: str,
+    params_dict: dict,
+    fitness_score: float,
+    version: int,
+) -> str:
+    title = name.replace("-", " ").title()
+    rows = []
+    for k in ("waveform", "attack", "decay", "sustain", "release",
+              "pulse_width", "filter_cutoff", "filter_resonance",
+              "filter_mode", "filter_voice1", "volume"):
+        if k in params_dict:
+            rows.append(f"| {k} | {params_dict[k]} |")
+    return _README_TEMPLATE.format(
+        title=title,
+        description=f"A SID chip instrument patch: {name}.",
+        tags=f"`{name}`",
+        param_rows="\n".join(rows),
+        fitness_score=fitness_score,
+        version=version,
+    )
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export a work-dir result to instruments/<name>/."""
+    work_dir = Path(args.work_dir).resolve()
+    best_params_path = work_dir / "best_params.json"
+    if not best_params_path.exists():
+        print(f"best_params.json not found in {work_dir}", file=sys.stderr)
+        return 2
+
+    params_dict = json.loads(best_params_path.read_text())
+    fitness_score = args.fitness_score
+
+    # Resolve project root (two levels up from tools/sidmatch/).
+    project_root = Path(__file__).resolve().parent.parent.parent
+    inst_dir = project_root / "instruments" / args.name
+    inst_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Versioning ---
+    existing_params_path = inst_dir / "params.json"
+    version = 1
+    if existing_params_path.exists():
+        try:
+            existing = json.loads(existing_params_path.read_text())
+            version = existing.get("version", 0) + 1
+            old_fitness = existing.get("fitness_score")
+            if old_fitness is not None and fitness_score > old_fitness:
+                print(
+                    f"[cli] WARNING: new fitness {fitness_score:.4f} is worse "
+                    f"than existing {old_fitness:.4f} (version {version - 1}). "
+                    f"Saving anyway as version {version}.",
+                    flush=True,
+                )
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # --- params.json ---
+    params_dict["fitness_score"] = round(fitness_score, 4)
+    params_dict["version"] = version
+    (inst_dir / "params.json").write_text(
+        json.dumps(params_dict, indent=2) + "\n"
+    )
+
+    # --- raw.asm ---
+    label = args.name.replace("-", "_")
+    sid_params = sid_params_from_dict(
+        {k: v for k, v in params_dict.items()
+         if k not in ("fitness_score", "version")}
+    )
+    asm_text = encode_raw_asm(
+        sid_params, label, fitness_score=fitness_score, version=version
+    )
+    (inst_dir / "raw.asm").write_text(asm_text)
+
+    # --- GoatTracker ---
+    try:
+        from .encoders.goattracker import encode_goattracker
+        gt_data = encode_goattracker(sid_params, args.name)
+        (inst_dir / "goattracker.ins").write_bytes(gt_data)
+    except Exception as e:
+        print(f"[cli] goattracker encode skipped: {e}", flush=True)
+
+    # --- Copy render if present ---
+    render_wav = work_dir / "best_render.wav"
+    if render_wav.exists():
+        import shutil
+        shutil.copy2(render_wav, inst_dir / "sid_render.wav")
+
+    # --- README.md ---
+    readme_text = _instrument_readme(args.name, params_dict, fitness_score, version)
+    (inst_dir / "README.md").write_text(readme_text)
+
+    print(
+        f"[cli] exported {args.name} v{version} "
+        f"(fitness={fitness_score:.4f}) to {inst_dir}/",
+        flush=True,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sidmatch")
     sub = p.add_subparsers(dest="command", required=True)
@@ -210,6 +344,13 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--work-dir", required=True)
     m.set_defaults(func=cmd_match)
+
+    e = sub.add_parser("export", help="export work-dir result to instruments/")
+    e.add_argument("--work-dir", required=True, help="sidmatch work directory")
+    e.add_argument("--name", required=True, help="instrument name (kebab-case)")
+    e.add_argument("--fitness-score", type=float, required=True,
+                   help="final fitness score")
+    e.set_defaults(func=cmd_export)
 
     return p
 

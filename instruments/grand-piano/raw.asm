@@ -31,6 +31,8 @@
 ; @meta freq_reg=4455
 ; @meta pw_table=0,959;16,1088;32,1024;49,3619
 ; @meta wavetable=
+; @meta fitness_score=0.4369
+; @meta version=1
 
 grand_piano_adsr:
     !byte $bb           ; attack<<4 | decay

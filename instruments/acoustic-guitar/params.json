@@ -16,5 +16,7 @@
   "gate_frames": 50,
   "release_frames": 50,
   "wavetable": null,
-  "volume": 15
+  "volume": 15,
+  "fitness_score": 0.2764,
+  "version": 1
 }
