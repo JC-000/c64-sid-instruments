@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+*.prg
+*.o
+*.lst
+*.labels
+labels.txt
+
+# VICE
+*.vsf
+*.vsn
+fliplist-*.vfl
+vice.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.bak
+
+# Python (for any tools/ scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
