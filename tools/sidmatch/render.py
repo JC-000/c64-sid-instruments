@@ -117,6 +117,11 @@ class SidParams:
             replace the control-register waveform bits on specific frames
             (the GATE bit is preserved).
         volume: master volume 0-15.
+        chip_model: target SID chip model, ``"6581"`` or ``"8580"``.
+            ``None`` means unspecified (pyresidfp defaults to MOS6581).
+        source_instrument: free-text description of the reference recording
+            used during optimization (e.g. ``"Salamander Grand Piano V3, C4
+            fortissimo"``).
     """
 
     waveform: str = "saw"
@@ -137,6 +142,8 @@ class SidParams:
     release_frames: int = 25
     wavetable: Optional[List[Tuple[int, int]]] = None
     volume: int = 15
+    chip_model: Optional[str] = None
+    source_instrument: Optional[str] = None
 
     # ---- derived helpers ----
 
@@ -176,20 +183,54 @@ class SidParams:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_chip_model(chip_model: Optional[str] = None):
+    """Return a pyresidfp ``ChipModel`` enum value.
+
+    Accepts ``"6581"`` or ``"8580"`` (strings). ``None`` leaves pyresidfp's
+    default (MOS6581).
+    """
+    if chip_model is None:
+        return None
+    from pyresidfp._pyresidfp import ChipModel  # type: ignore
+
+    chip_model = str(chip_model).strip()
+    if chip_model in ("6581", "MOS6581"):
+        return ChipModel.MOS6581
+    if chip_model in ("8580", "MOS8580"):
+        return ChipModel.MOS8580
+    raise ValueError(
+        f"Unknown chip_model {chip_model!r}; expected '6581' or '8580'"
+    )
+
+
 def render_pyresid(
-    params: SidParams, sample_rate: int = 44100
+    params: SidParams, sample_rate: int = 44100, chip_model: Optional[str] = None,
 ) -> np.ndarray:
     """Render ``params`` with pyresidfp.
+
+    Parameters
+    ----------
+    params : SidParams
+        The voice patch to render.
+    sample_rate : int
+        Output sample rate in Hz.
+    chip_model : str or None
+        ``"6581"`` or ``"8580"``.  ``None`` uses pyresidfp's default
+        (MOS6581).
 
     Returns a mono float32 numpy array in ``[-1, 1]``.
     """
     # Local import so that test collection works without pyresidfp.
     from pyresidfp import SoundInterfaceDevice, WritableRegister  # type: ignore
 
-    sid = SoundInterfaceDevice(
+    model = _resolve_chip_model(chip_model)
+    kw: dict = dict(
         sampling_frequency=sample_rate,
         clock_frequency=PAL_CLOCK_HZ,
     )
+    if model is not None:
+        kw["model"] = model
+    sid = SoundInterfaceDevice(**kw)
     sid.reset()
 
     freq_reg = hz_to_sid_freq(params.frequency, PAL_CLOCK_HZ)

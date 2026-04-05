@@ -33,6 +33,8 @@
 ; @meta wavetable=
 ; @meta fitness_score=0.2764
 ; @meta version=1
+; @meta chip_model=6581
+; @meta source_instrument=Philharmonia Orchestra, acoustic guitar E4 forte (CC-BY-SA 3.0)
 
 acoustic_guitar_adsr:
     !byte $7b           ; attack<<4 | decay

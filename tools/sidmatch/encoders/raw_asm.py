@@ -39,6 +39,8 @@ def encode_raw_asm(
     *,
     fitness_score: float | None = None,
     version: int | None = None,
+    chip_model: str | None = None,
+    source_instrument: str | None = None,
 ) -> str:
     """Render ``params`` as ACME assembly source.
 
@@ -118,6 +120,13 @@ def encode_raw_asm(
         meta["fitness_score"] = f"{fitness_score:.4f}"
     if version is not None:
         meta["version"] = version
+    # Use explicit arguments first, then fall back to SidParams fields.
+    _chip = chip_model or params.chip_model
+    _source = source_instrument or params.source_instrument
+    if _chip is not None:
+        meta["chip_model"] = _chip
+    if _source is not None:
+        meta["source_instrument"] = _source
     for k, v in meta.items():
         lines.append(f"; @meta {k}={v}")
     # Tables serialized as json-ish lists for exact round-trip.
@@ -238,7 +247,7 @@ def parse_raw_asm(path_or_text: Union[str, Path]) -> Dict:
             out[key] = float(val)
         elif key == "version":
             out[key] = int(val)
-        elif key in ("waveform", "filter_mode"):
+        elif key in ("waveform", "filter_mode", "chip_model", "source_instrument"):
             out[key] = val
         elif key == "pw_table":
             out[key] = _parse_pairlist(val)

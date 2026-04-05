@@ -141,6 +141,8 @@ def cmd_match(args: argparse.Namespace) -> int:
         "filter_mode": best_combo["filter_mode"],
         "filter_voice1": best_combo["filter_mode"] != "off",
     }
+    if args.chip_model:
+        fixed["chip_model"] = args.chip_model
     print(
         f"[cli] full optimization budget={args.budget} patience={args.patience}",
         flush=True,
@@ -169,7 +171,8 @@ def cmd_match(args: argparse.Namespace) -> int:
         json.dumps(sid_params_to_dict(result.best_params), indent=2)
     )
     # Render best patch.
-    audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR)
+    audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR,
+                           chip_model=args.chip_model)
     sf.write(str(work_dir / "best_render.wav"), audio, CANONICAL_SR)
     # Plot.
     _save_fitness_plot(result.history, work_dir / "fitness_history.png")
@@ -203,6 +206,13 @@ _README_TEMPLATE = """\
 
 {description}
 
+## Source and Target
+
+| | |
+|---|---|
+| **Source instrument** | {source_instrument} |
+| **Target SID model** | {chip_model} |
+
 ## Tags
 
 {tags}
@@ -234,6 +244,8 @@ def _instrument_readme(
     params_dict: dict,
     fitness_score: float,
     version: int,
+    chip_model: str | None = None,
+    source_instrument: str | None = None,
 ) -> str:
     title = name.replace("-", " ").title()
     rows = []
@@ -249,6 +261,8 @@ def _instrument_readme(
         param_rows="\n".join(rows),
         fitness_score=fitness_score,
         version=version,
+        chip_model=chip_model or params_dict.get("chip_model", "unspecified"),
+        source_instrument=source_instrument or params_dict.get("source_instrument", "unspecified"),
     )
 
 
@@ -289,6 +303,10 @@ def cmd_export(args: argparse.Namespace) -> int:
     # --- params.json ---
     params_dict["fitness_score"] = round(fitness_score, 4)
     params_dict["version"] = version
+    if args.chip_model:
+        params_dict["chip_model"] = args.chip_model
+    if args.source_instrument:
+        params_dict["source_instrument"] = args.source_instrument
     (inst_dir / "params.json").write_text(
         json.dumps(params_dict, indent=2) + "\n"
     )
@@ -300,7 +318,8 @@ def cmd_export(args: argparse.Namespace) -> int:
          if k not in ("fitness_score", "version")}
     )
     asm_text = encode_raw_asm(
-        sid_params, label, fitness_score=fitness_score, version=version
+        sid_params, label, fitness_score=fitness_score, version=version,
+        chip_model=args.chip_model, source_instrument=args.source_instrument,
     )
     (inst_dir / "raw.asm").write_text(asm_text)
 
@@ -319,7 +338,10 @@ def cmd_export(args: argparse.Namespace) -> int:
         shutil.copy2(render_wav, inst_dir / "sid_render.wav")
 
     # --- README.md ---
-    readme_text = _instrument_readme(args.name, params_dict, fitness_score, version)
+    readme_text = _instrument_readme(
+        args.name, params_dict, fitness_score, version,
+        chip_model=args.chip_model, source_instrument=args.source_instrument,
+    )
     (inst_dir / "README.md").write_text(readme_text)
 
     print(
@@ -343,6 +365,10 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--workers", type=int, default=None)
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--work-dir", required=True)
+    m.add_argument("--chip-model", default=None, choices=["6581", "8580"],
+                   help="target SID chip model (default: pyresidfp default, MOS6581)")
+    m.add_argument("--source-instrument", default=None,
+                   help="free-text description of the reference recording")
     m.set_defaults(func=cmd_match)
 
     e = sub.add_parser("export", help="export work-dir result to instruments/")
@@ -350,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--name", required=True, help="instrument name (kebab-case)")
     e.add_argument("--fitness-score", type=float, required=True,
                    help="final fitness score")
+    e.add_argument("--chip-model", default=None, choices=["6581", "8580"],
+                   help="target SID chip model")
+    e.add_argument("--source-instrument", default=None,
+                   help="free-text description of the reference recording")
     e.set_defaults(func=cmd_export)
 
     return p

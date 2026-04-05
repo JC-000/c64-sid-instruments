@@ -84,6 +84,28 @@ See `tools/sidmatch/fitness.py` for the implementation and
 `tools/sidmatch/README.md` for the full feature-extraction and distance
 documentation.
 
+## Optimization targets
+
+Each instrument in this library is optimized against a specific **source
+recording** and a specific **target SID chip model**.
+
+- **Source recording** -- the real-world instrument sample used as the
+  optimization reference. Each instrument's README and `params.json` cite
+  the exact sample (e.g. "Salamander Grand Piano V3, C4 fortissimo").
+- **Target SID model** -- either MOS 6581 or CSG 8580. The two chip
+  revisions have significantly different analog filter implementations:
+  the 6581 has a darker, more distorted filter curve while the 8580's
+  filters are cleaner and closer to spec. An instrument optimized for one
+  chip will still play on the other, but the filter response (and
+  therefore the timbre) may differ noticeably.
+- The current instruments were optimized using **pyresidfp's default
+  model, which is the MOS 6581**.
+- Future instruments may ship both 6581 and 8580 variants when the
+  timbral difference is significant.
+
+The `--chip-model` flag on `sidmatch match` and `sidmatch export`
+selects which emulated SID is used during optimization and rendering.
+
 ## License
 
 Instruments are released under [CC-BY 4.0](LICENSE). Attribution goes to

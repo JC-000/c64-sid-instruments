@@ -18,5 +18,7 @@
   "wavetable": null,
   "volume": 15,
   "fitness_score": 0.2764,
-  "version": 1
+  "version": 1,
+  "chip_model": "6581",
+  "source_instrument": "Philharmonia Orchestra, acoustic guitar E4 forte (CC-BY-SA 3.0)"
 }
