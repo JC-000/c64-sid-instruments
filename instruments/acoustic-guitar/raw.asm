@@ -31,6 +31,8 @@
 ; @meta freq_reg=5613
 ; @meta pw_table=
 ; @meta wavetable=
+; @meta fitness_score=0.2764
+; @meta version=1
 
 acoustic_guitar_adsr:
     !byte $7b           ; attack<<4 | decay

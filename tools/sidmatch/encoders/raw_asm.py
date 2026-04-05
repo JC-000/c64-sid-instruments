@@ -33,12 +33,21 @@ def _fmt_byte(v: int) -> str:
     return f"${v & 0xFF:02x}"
 
 
-def encode_raw_asm(params: SidParams, label_prefix: str) -> str:
+def encode_raw_asm(
+    params: SidParams,
+    label_prefix: str,
+    *,
+    fitness_score: float | None = None,
+    version: int | None = None,
+) -> str:
     """Render ``params`` as ACME assembly source.
 
     The returned text uses ``!byte`` directives and is suitable for
     ``!source``-inclusion by a song driver. Labels are prefixed with
     ``label_prefix``.
+
+    Optional ``fitness_score`` and ``version`` are recorded as ``@meta``
+    comment lines when provided.
     """
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", label_prefix):
         raise ValueError(f"label_prefix {label_prefix!r} is not a valid symbol")
@@ -105,6 +114,10 @@ def encode_raw_asm(params: SidParams, label_prefix: str) -> str:
         "volume": params.volume,
         "freq_reg": freq_reg,
     }
+    if fitness_score is not None:
+        meta["fitness_score"] = f"{fitness_score:.4f}"
+    if version is not None:
+        meta["version"] = version
     for k, v in meta.items():
         lines.append(f"; @meta {k}={v}")
     # Tables serialized as json-ish lists for exact round-trip.
@@ -221,8 +234,10 @@ def parse_raw_asm(path_or_text: Union[str, Path]) -> Dict:
         if not m:
             continue
         key, val = m.group(1), m.group(2).rstrip()
-        if key == "frequency":
+        if key in ("frequency", "fitness_score"):
             out[key] = float(val)
+        elif key == "version":
+            out[key] = int(val)
         elif key in ("waveform", "filter_mode"):
             out[key] = val
         elif key == "pw_table":
