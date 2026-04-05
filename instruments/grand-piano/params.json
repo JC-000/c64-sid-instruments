@@ -1,0 +1,41 @@
+{
+  "waveform": "pulse",
+  "attack": 11,
+  "decay": 11,
+  "sustain": 12,
+  "release": 5,
+  "pulse_width": 1528,
+  "pw_table": [
+    [
+      0,
+      959
+    ],
+    [
+      16,
+      1088
+    ],
+    [
+      32,
+      1024
+    ],
+    [
+      49,
+      3619
+    ]
+  ],
+  "filter_cutoff": 310,
+  "filter_resonance": 10,
+  "filter_mode": "lp",
+  "filter_voice1": true,
+  "ring_mod": false,
+  "sync": false,
+  "frequency": 261.63,
+  "gate_frames": 50,
+  "release_frames": 50,
+  "wavetable": null,
+  "volume": 15,
+  "fitness_score": 0.4369,
+  "version": 1,
+  "chip_model": "6581",
+  "source_instrument": "Salamander Grand Piano V3, C4 fortissimo (CC-BY 3.0, Alexander Holm)"
+}
