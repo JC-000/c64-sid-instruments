@@ -1,7 +1,13 @@
 """Command-line interface for sidmatch.
 
+By default, ``match`` runs the full optimization for **both** 6581 and 8580
+chip models and writes results to ``<work-dir>/6581/`` and
+``<work-dir>/8580/`` respectively.  Use ``--chip-model`` to restrict to a
+single chip.
+
 Usage::
 
+    # Both chips (default):
     python3 -m sidmatch.cli match \\
         --sample tools/samples/grand-piano/salamander-piano-C4-v16-ff.wav \\
         --frequency 261.63 \\
@@ -10,6 +16,12 @@ Usage::
         --patience 500 \\
         --workers 8 \\
         --work-dir work/grand-piano
+
+    # Single chip:
+    python3 -m sidmatch.cli match \\
+        --chip-model 6581 \\
+        --sample ... --frequency 261.63 --name grand-piano \\
+        --work-dir work/grand-piano-6581
 """
 
 from __future__ import annotations
@@ -98,19 +110,26 @@ def _write_report(
     (work_dir / "report.md").write_text("\n".join(lines))
 
 
-def cmd_match(args: argparse.Namespace) -> int:
-    sample_path = Path(args.sample).resolve()
-    if not sample_path.exists():
-        print(f"sample not found: {sample_path}", file=sys.stderr)
-        return 2
+CHIP_MODELS = ["6581", "8580"]
 
-    work_dir = Path(args.work_dir)
+
+def _run_match_single_chip(
+    sample_path: Path,
+    work_dir: Path,
+    args: argparse.Namespace,
+    chip_model: str,
+) -> OptimizerResult:
+    """Run the full match pipeline for a single chip model.
+
+    Results are written into *work_dir* (which should already be
+    chip-specific, e.g. ``<root>/6581/``).
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
 
     per_combo = max(50, args.budget // 8)
 
     print(
-        f"[cli] grid_search per_combo_budget={per_combo} "
+        f"[cli] [{chip_model}] grid_search per_combo_budget={per_combo} "
         f"workers={args.workers}",
         flush=True,
     )
@@ -130,7 +149,7 @@ def cmd_match(args: argparse.Namespace) -> int:
         "filter_mode": best.best_params.filter_mode,
     }
     print(
-        f"[cli] best grid combo: wf={best_combo['waveform']} "
+        f"[cli] [{chip_model}] best grid combo: wf={best_combo['waveform']} "
         f"filter={best_combo['filter_mode']} fitness={best.best_fitness:.4f}",
         flush=True,
     )
@@ -140,11 +159,11 @@ def cmd_match(args: argparse.Namespace) -> int:
         "waveform": best_combo["waveform"],
         "filter_mode": best_combo["filter_mode"],
         "filter_voice1": best_combo["filter_mode"] != "off",
+        "chip_model": chip_model,
     }
-    if args.chip_model:
-        fixed["chip_model"] = args.chip_model
     print(
-        f"[cli] full optimization budget={args.budget} patience={args.patience}",
+        f"[cli] [{chip_model}] full optimization budget={args.budget} "
+        f"patience={args.patience}",
         flush=True,
     )
     opt = Optimizer(
@@ -160,7 +179,7 @@ def cmd_match(args: argparse.Namespace) -> int:
     )
     result = opt.run()
     print(
-        f"[cli] final best fitness={result.best_fitness:.4f} "
+        f"[cli] [{chip_model}] final best fitness={result.best_fitness:.4f} "
         f"evals={result.evaluations} time={result.wall_time_s:.1f}s "
         f"converged={result.converged}",
         flush=True,
@@ -172,7 +191,7 @@ def cmd_match(args: argparse.Namespace) -> int:
     )
     # Render best patch.
     audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR,
-                           chip_model=args.chip_model)
+                           chip_model=chip_model)
     sf.write(str(work_dir / "best_render.wav"), audio, CANONICAL_SR)
     # Plot.
     _save_fitness_plot(result.history, work_dir / "fitness_history.png")
@@ -197,7 +216,51 @@ def cmd_match(args: argparse.Namespace) -> int:
         final_result=result,
     )
 
-    print(f"[cli] wrote outputs to {work_dir}/", flush=True)
+    print(f"[cli] [{chip_model}] wrote outputs to {work_dir}/", flush=True)
+    return result
+
+
+def cmd_match(args: argparse.Namespace) -> int:
+    sample_path = Path(args.sample).resolve()
+    if not sample_path.exists():
+        print(f"sample not found: {sample_path}", file=sys.stderr)
+        return 2
+
+    work_dir = Path(args.work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine which chip models to run.
+    if args.chip_model:
+        # Explicit single-chip overrides --all-chips.
+        chips = [args.chip_model]
+    elif args.all_chips:
+        chips = list(CHIP_MODELS)
+    else:
+        chips = list(CHIP_MODELS)
+
+    results: dict[str, OptimizerResult] = {}
+    for chip in chips:
+        if len(chips) > 1:
+            chip_work_dir = work_dir / chip
+        else:
+            chip_work_dir = work_dir
+        result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
+        results[chip] = result
+
+    # Print summary comparing chips.
+    if len(results) > 1:
+        print("\n[cli] === Chip comparison summary ===", flush=True)
+        print(f"{'Chip':<8} {'Fitness':>10} {'Evals':>8} {'Time (s)':>10} {'Converged'}", flush=True)
+        print("-" * 50, flush=True)
+        for chip, res in results.items():
+            print(
+                f"{chip:<8} {res.best_fitness:>10.4f} {res.evaluations:>8} "
+                f"{res.wall_time_s:>10.1f} {res.converged}",
+                flush=True,
+            )
+        best_chip = min(results, key=lambda c: results[c].best_fitness)
+        print(f"\n[cli] Best chip: {best_chip} (fitness={results[best_chip].best_fitness:.4f})", flush=True)
+
     return 0
 
 
@@ -266,20 +329,25 @@ def _instrument_readme(
     )
 
 
-def cmd_export(args: argparse.Namespace) -> int:
-    """Export a work-dir result to instruments/<name>/."""
-    work_dir = Path(args.work_dir).resolve()
+def _export_single_chip(
+    work_dir: Path,
+    inst_dir: Path,
+    chip_model: str,
+    name: str,
+    source_instrument: Optional[str],
+) -> tuple[dict, float, int]:
+    """Export one chip variant from *work_dir* into *inst_dir*.
+
+    Returns ``(params_dict, fitness_score, version)``.
+    """
     best_params_path = work_dir / "best_params.json"
-    if not best_params_path.exists():
-        print(f"best_params.json not found in {work_dir}", file=sys.stderr)
-        return 2
-
     params_dict = json.loads(best_params_path.read_text())
-    fitness_score = args.fitness_score
+    # Derive fitness from the optimizer checkpoint.
+    fitness_score = params_dict.get(
+        "fitness_score",
+        _read_fitness_from_checkpoint(work_dir),
+    )
 
-    # Resolve project root (two levels up from tools/sidmatch/).
-    project_root = Path(__file__).resolve().parent.parent.parent
-    inst_dir = project_root / "instruments" / args.name
     inst_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Versioning ---
@@ -292,8 +360,9 @@ def cmd_export(args: argparse.Namespace) -> int:
             old_fitness = existing.get("fitness_score")
             if old_fitness is not None and fitness_score > old_fitness:
                 print(
-                    f"[cli] WARNING: new fitness {fitness_score:.4f} is worse "
-                    f"than existing {old_fitness:.4f} (version {version - 1}). "
+                    f"[cli] [{chip_model}] WARNING: new fitness "
+                    f"{fitness_score:.4f} is worse than existing "
+                    f"{old_fitness:.4f} (version {version - 1}). "
                     f"Saving anyway as version {version}.",
                     flush=True,
                 )
@@ -303,33 +372,32 @@ def cmd_export(args: argparse.Namespace) -> int:
     # --- params.json ---
     params_dict["fitness_score"] = round(fitness_score, 4)
     params_dict["version"] = version
-    if args.chip_model:
-        params_dict["chip_model"] = args.chip_model
-    if args.source_instrument:
-        params_dict["source_instrument"] = args.source_instrument
+    params_dict["chip_model"] = chip_model
+    if source_instrument:
+        params_dict["source_instrument"] = source_instrument
     (inst_dir / "params.json").write_text(
         json.dumps(params_dict, indent=2) + "\n"
     )
 
     # --- raw.asm ---
-    label = args.name.replace("-", "_")
+    label = name.replace("-", "_")
     sid_params = sid_params_from_dict(
         {k: v for k, v in params_dict.items()
          if k not in ("fitness_score", "version")}
     )
     asm_text = encode_raw_asm(
         sid_params, label, fitness_score=fitness_score, version=version,
-        chip_model=args.chip_model, source_instrument=args.source_instrument,
+        chip_model=chip_model, source_instrument=source_instrument,
     )
     (inst_dir / "raw.asm").write_text(asm_text)
 
     # --- GoatTracker ---
     try:
         from .encoders.goattracker import encode_goattracker
-        gt_data = encode_goattracker(sid_params, args.name)
+        gt_data = encode_goattracker(sid_params, name)
         (inst_dir / "goattracker.ins").write_bytes(gt_data)
     except Exception as e:
-        print(f"[cli] goattracker encode skipped: {e}", flush=True)
+        print(f"[cli] [{chip_model}] goattracker encode skipped: {e}", flush=True)
 
     # --- Copy render if present ---
     render_wav = work_dir / "best_render.wav"
@@ -337,18 +405,172 @@ def cmd_export(args: argparse.Namespace) -> int:
         import shutil
         shutil.copy2(render_wav, inst_dir / "sid_render.wav")
 
-    # --- README.md ---
-    readme_text = _instrument_readme(
-        args.name, params_dict, fitness_score, version,
-        chip_model=args.chip_model, source_instrument=args.source_instrument,
-    )
-    (inst_dir / "README.md").write_text(readme_text)
-
     print(
-        f"[cli] exported {args.name} v{version} "
+        f"[cli] exported {name} [{chip_model}] v{version} "
         f"(fitness={fitness_score:.4f}) to {inst_dir}/",
         flush=True,
     )
+    return params_dict, fitness_score, version
+
+
+def _read_fitness_from_checkpoint(work_dir: Path) -> float:
+    """Try to read the best fitness from the optimizer checkpoint."""
+    cp_path = work_dir / "final" / "optim_state.json"
+    if cp_path.exists():
+        try:
+            state = json.loads(cp_path.read_text())
+            return float(state["best_fitness"])
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return 0.0
+
+
+_COMBINED_README_TEMPLATE = """\
+# {title} (SID Instrument)
+
+{description}
+
+## Chip Variants
+
+| | 6581 | 8580 |
+|---|---|---|
+| **Status** | {status_6581} | {status_8580} |
+| **Fitness** | {fitness_6581} | {fitness_8580} |
+| **Version** | {version_6581} | {version_8580} |
+
+{variant_details}
+
+## Tags
+
+`{name}`
+
+## Files
+
+Each chip subdirectory contains:
+
+| File | Description |
+|---|---|
+| `params.json` | Machine-readable SID parameters |
+| `raw.asm` | ACME-includable assembly tables |
+| `goattracker.ins` | GoatTracker 2.x instrument binary |
+"""
+
+
+def _write_combined_readme(
+    inst_dir: Path,
+    name: str,
+    chip_data: dict[str, tuple[dict, float, int] | None],
+    source_instrument: Optional[str] = None,
+) -> None:
+    """Write a combined README.md covering both chip variants."""
+    title = name.replace("-", " ").title()
+
+    def _chip_status(chip: str) -> tuple[str, str, str]:
+        data = chip_data.get(chip)
+        if data is None:
+            return "not exported", "---", "---"
+        _, fitness, version = data
+        return "available", f"{fitness:.4f}", str(version)
+
+    s6, f6, v6 = _chip_status("6581")
+    s8, f8, v8 = _chip_status("8580")
+
+    details_parts = []
+    for chip in CHIP_MODELS:
+        data = chip_data.get(chip)
+        if data is None:
+            continue
+        params_dict, fitness, version = data
+        rows = []
+        for k in ("waveform", "attack", "decay", "sustain", "release",
+                  "pulse_width", "filter_cutoff", "filter_resonance",
+                  "filter_mode", "filter_voice1", "volume"):
+            if k in params_dict:
+                rows.append(f"| {k} | {params_dict[k]} |")
+        details_parts.append(
+            f"### {chip} Parameters\n\n"
+            f"| Parameter | Value |\n|---|---|\n"
+            + "\n".join(rows)
+        )
+
+    readme_text = _COMBINED_README_TEMPLATE.format(
+        title=title,
+        description=f"A SID chip instrument patch: {name}.",
+        name=name,
+        status_6581=s6,
+        status_8580=s8,
+        fitness_6581=f6,
+        fitness_8580=f8,
+        version_6581=v6,
+        version_8580=v8,
+        variant_details="\n\n".join(details_parts),
+    )
+    (inst_dir / "README.md").write_text(readme_text)
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export a work-dir result to instruments/<name>/."""
+    work_dir = Path(args.work_dir).resolve()
+
+    # Resolve project root (two levels up from tools/sidmatch/).
+    project_root = Path(__file__).resolve().parent.parent.parent
+    inst_base = project_root / "instruments" / args.name
+
+    # Detect which chip results exist in the work dir.
+    available_chips: list[str] = []
+    for chip in CHIP_MODELS:
+        if (work_dir / chip / "best_params.json").exists():
+            available_chips.append(chip)
+
+    # Fall back to legacy flat layout (single chip).
+    if not available_chips and (work_dir / "best_params.json").exists():
+        chip = args.chip_model or "6581"
+        available_chips = [chip]
+
+    if not available_chips:
+        print(
+            f"No best_params.json found in {work_dir} "
+            f"(checked subdirs 6581/, 8580/ and root)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # If user explicitly requested a single chip, filter.
+    if args.chip_model:
+        if args.chip_model not in available_chips:
+            print(
+                f"Chip {args.chip_model} results not found in {work_dir}",
+                file=sys.stderr,
+            )
+            return 2
+        available_chips = [args.chip_model]
+
+    chip_data: dict[str, tuple[dict, float, int] | None] = {}
+    for chip in available_chips:
+        # Determine source work dir for this chip.
+        chip_work = work_dir / chip if (work_dir / chip / "best_params.json").exists() else work_dir
+        chip_inst = inst_base / chip
+        params_dict, fitness, version = _export_single_chip(
+            work_dir=chip_work,
+            inst_dir=chip_inst,
+            chip_model=chip,
+            name=args.name,
+            source_instrument=args.source_instrument,
+        )
+        chip_data[chip] = (params_dict, fitness, version)
+
+    # Mark missing chips as None for the README.
+    for chip in CHIP_MODELS:
+        if chip not in chip_data:
+            chip_data[chip] = None
+
+    # --- Combined README.md at instruments/<name>/ level ---
+    inst_base.mkdir(parents=True, exist_ok=True)
+    _write_combined_readme(
+        inst_base, args.name, chip_data,
+        source_instrument=args.source_instrument,
+    )
+
     return 0
 
 
@@ -366,7 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--work-dir", required=True)
     m.add_argument("--chip-model", default=None, choices=["6581", "8580"],
-                   help="target SID chip model (default: pyresidfp default, MOS6581)")
+                   help="run only this chip model (overrides --all-chips)")
+    m.add_argument("--all-chips", default=True, action=argparse.BooleanOptionalAction,
+                   help="run both 6581 and 8580 variants (default: True)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     m.set_defaults(func=cmd_match)
@@ -374,10 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("export", help="export work-dir result to instruments/")
     e.add_argument("--work-dir", required=True, help="sidmatch work directory")
     e.add_argument("--name", required=True, help="instrument name (kebab-case)")
-    e.add_argument("--fitness-score", type=float, required=True,
-                   help="final fitness score")
+    e.add_argument("--fitness-score", type=float, default=None,
+                   help="final fitness score (auto-detected from work-dir if omitted)")
     e.add_argument("--chip-model", default=None, choices=["6581", "8580"],
-                   help="target SID chip model")
+                   help="export only this chip model (default: export all available)")
     e.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     e.set_defaults(func=cmd_export)
