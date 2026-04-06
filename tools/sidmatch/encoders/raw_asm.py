@@ -2,22 +2,17 @@
 
 Output format (GoatTracker-style tables):
 
-* ``<prefix>_wavetable``: pairs of ``(waveform_byte, cmd_byte)`` rows. If the
-  patch has no per-frame ``wavetable``, a single row is emitted holding the
-  static waveform; otherwise each entry in ``wavetable`` becomes a row
-  (``cmd_byte`` is always ``$00`` for now - reserved for future use).
-* ``<prefix>_pulsetable``: pairs of ``(speed, target_hi)`` rows where ``speed``
-  is ``$00`` for an absolute PW set and ``target_hi`` is the high byte of the
-  pulse width (0-255, covering the 4096-step range in 16-step increments).
-  If the patch has no ``pw_table``, a single absolute row is emitted holding
-  the static pulse width.
+* ``<prefix>_wavetable``: pairs of ``(waveform_byte, cmd_byte)`` rows. Emits
+  the actual per-frame wavetable sequence (test bit, attack waveform, sustain
+  waveform) rather than a single static entry.
+* ``<prefix>_pulsetable``: pairs of ``(speed, target_hi)`` rows encoding the
+  PW sweep parameters as per-frame data.
 * ``<prefix>_filtertable``: triples of ``(cutoff_hi, resonance_routing, mode)``.
-  A single row encodes the static filter state.
+  Encodes the filter sweep as per-frame data.
 * ``<prefix>_adsr``: two bytes - ``(attack<<4)|decay``, ``(sustain<<4)|release``.
 
-The header also records the note frequency (as a 16-bit SID freq register),
-volume, gate and release frame counts, ring-mod and sync flags so the round
-trip parser can recover every :class:`SidParams` field.
+The header also records all SidParams fields so the round-trip parser can
+recover every field.
 """
 
 from __future__ import annotations
@@ -26,11 +21,32 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
-from ..render import SidParams, _waveform_mask, hz_to_sid_freq, PAL_CLOCK_HZ
+from ..render import (
+    SidParams,
+    _waveform_mask,
+    hz_to_sid_freq,
+    PAL_CLOCK_HZ,
+    _compute_pw_for_frame,
+    _compute_filter_cutoff_for_frame,
+    WF_TEST,
+    WF_GATE,
+    WF_RING_MOD,
+    WF_SYNC,
+)
 
 
 def _fmt_byte(v: int) -> str:
     return f"${v & 0xFF:02x}"
+
+
+def _build_control_byte(params: SidParams, wf_mask: int) -> int:
+    """Build control byte with ring_mod/sync but no gate (for table encoding)."""
+    cb = wf_mask
+    if params.ring_mod:
+        cb |= WF_RING_MOD
+    if params.sync:
+        cb |= WF_SYNC
+    return cb & 0xFE  # no gate bit in table
 
 
 def encode_raw_asm(
@@ -48,8 +64,7 @@ def encode_raw_asm(
     ``!source``-inclusion by a song driver. Labels are prefixed with
     ``label_prefix``.
 
-    Optional ``fitness_score`` and ``version`` are recorded as ``@meta``
-    comment lines when provided.
+    Emits actual per-frame wavetable, PW sweep, and filter sweep data.
     """
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", label_prefix):
         raise ValueError(f"label_prefix {label_prefix!r} is not a valid symbol")
@@ -69,12 +84,22 @@ def encode_raw_asm(
     )
     lines.append(
         f";   pulse_width      = {params.pulse_width} "
-        f"(pw_table entries={len(params.pw_table or [])})"
+        f"(pw_start={params.pw_start} pw_delta={params.pw_delta} "
+        f"pw_mode={params.pw_mode})"
     )
     lines.append(
         f";   filter           = mode={params.filter_mode!r} "
-        f"cutoff={params.filter_cutoff} res={params.filter_resonance} "
+        f"cutoff_start={params.effective_filter_cutoff_start()} "
+        f"cutoff_end={params.effective_filter_cutoff_end()} "
+        f"sweep_frames={params.filter_sweep_frames} "
+        f"res={params.filter_resonance} "
         f"voice1={int(params.filter_voice1)}"
+    )
+    lines.append(
+        f";   wavetable        = attack_wf={params.effective_attack_waveform()!r} "
+        f"sustain_wf={params.effective_sustain_waveform()!r} "
+        f"attack_frames={params.wt_attack_frames} "
+        f"test_bit={params.wt_use_test_bit}"
     )
     lines.append(
         f";   ring_mod={int(params.ring_mod)} sync={int(params.sync)} "
@@ -88,15 +113,10 @@ def encode_raw_asm(
         f";   gate_frames={params.gate_frames} "
         f"release_frames={params.release_frames}"
     )
-    lines.append(
-        f";   wavetable entries = {len(params.wavetable or [])}"
-    )
     lines.append("; ================================================================")
     lines.append("")
 
     # ---- Metadata block (machine-readable, parsed back by parse_raw_asm) ----
-    # Emitted as plain assembler-comment key=value pairs so the file is still
-    # a clean include; the parser keys off the "; @meta " prefix.
     meta = {
         "waveform": params.waveform,
         "attack": params.attack,
@@ -115,12 +135,24 @@ def encode_raw_asm(
         "release_frames": params.release_frames,
         "volume": params.volume,
         "freq_reg": freq_reg,
+        # New fields
+        "wt_attack_frames": params.wt_attack_frames,
+        "wt_attack_waveform": params.wt_attack_waveform or "",
+        "wt_sustain_waveform": params.wt_sustain_waveform or "",
+        "wt_use_test_bit": int(params.wt_use_test_bit),
+        "pw_start": params.pw_start if params.pw_start is not None else params.pulse_width,
+        "pw_delta": params.pw_delta,
+        "pw_min": params.pw_min,
+        "pw_max": params.pw_max,
+        "pw_mode": params.pw_mode,
+        "filter_cutoff_start": params.effective_filter_cutoff_start(),
+        "filter_cutoff_end": params.effective_filter_cutoff_end(),
+        "filter_sweep_frames": params.filter_sweep_frames,
     }
     if fitness_score is not None:
         meta["fitness_score"] = f"{fitness_score:.4f}"
     if version is not None:
         meta["version"] = version
-    # Use explicit arguments first, then fall back to SidParams fields.
     _chip = chip_model or params.chip_model
     _source = source_instrument or params.source_instrument
     if _chip is not None:
@@ -129,7 +161,7 @@ def encode_raw_asm(
         meta["source_instrument"] = _source
     for k, v in meta.items():
         lines.append(f"; @meta {k}={v}")
-    # Tables serialized as json-ish lists for exact round-trip.
+    # Legacy table fields for backward compat
     pw_table_repr = ";".join(f"{f},{v}" for f, v in (params.pw_table or []))
     wt_repr = ";".join(f"{f},{v}" for f, v in (params.wavetable or []))
     lines.append(f"; @meta pw_table={pw_table_repr}")
@@ -144,53 +176,91 @@ def encode_raw_asm(
     lines.append(f"    !byte {_fmt_byte(sr)}           ; sustain<<4 | release")
     lines.append("")
 
-    # ---- Wavetable ----
-    wavetable = params.wavetable or []
+    # ---- Wavetable (per-frame) ----
+    sustain_wf = _waveform_mask(params.effective_sustain_waveform())
+    attack_wf_mask = _waveform_mask(params.effective_attack_waveform())
+    wt_attack_frames = max(1, params.wt_attack_frames)
+
     lines.append(f"{label_prefix}_wavetable:")
-    if not wavetable:
+    # Emit a few frames representing the wavetable sequence
+    wt_rows = []
+    max_wt_entries = max(wt_attack_frames + 2, 4)  # enough to show the sequence
+    for f in range(max_wt_entries):
+        if params.wt_use_test_bit and f == 0:
+            wf_byte = WF_TEST
+            comment = "test bit (reset osc)"
+        elif f <= wt_attack_frames:
+            wf_byte = _build_control_byte(params, attack_wf_mask)
+            comment = f"attack wf (frame {f})"
+        else:
+            wf_byte = _build_control_byte(params, sustain_wf)
+            comment = f"sustain wf (frame {f})"
+        wt_rows.append((wf_byte, f, comment))
+
+    for wf_byte, frame, comment in wt_rows:
         lines.append(
-            f"    !byte {_fmt_byte(wf_mask)}, $00     ; static waveform, no cmd"
+            f"    !byte {_fmt_byte(wf_byte)}, {_fmt_byte(frame & 0xFF)} "
+            f"; {comment}"
         )
-    else:
-        for frame, wf_byte in wavetable:
-            lines.append(
-                f"    !byte {_fmt_byte(wf_byte)}, {_fmt_byte(frame & 0xFF)} "
-                f"; frame {frame}"
-            )
     lines.append(f"    !byte $ff, $00             ; end-of-table marker")
     lines.append("")
 
-    # ---- Pulsetable ----
-    pw_table = params.pw_table or []
+    # ---- Pulsetable (PW sweep) ----
+    pw_start_val = params.effective_pw_start()
+    pw_delta = params.pw_delta
+    pw_min_val = params.pw_min
+    pw_max_val = params.pw_max
+    pw_mode = params.pw_mode or "sweep"
+
     lines.append(f"{label_prefix}_pulsetable:")
-    if not pw_table:
-        pw_hi = (params.pulse_width >> 4) & 0xFF
+    if pw_delta == 0:
+        # Static PW
+        pw_hi = (pw_start_val >> 4) & 0xFF
         lines.append(
             f"    !byte $00, {_fmt_byte(pw_hi)}       "
-            f"; absolute PW = {params.pulse_width}"
+            f"; absolute PW = {pw_start_val}"
         )
     else:
-        for frame, pw in pw_table:
+        # Emit sweep parameters and a few sample frames
+        num_pw_entries = min(16, max(4, abs(pw_delta) * 8))
+        for f in range(num_pw_entries):
+            pw = _compute_pw_for_frame(f, pw_start_val, pw_delta, pw_min_val, pw_max_val, pw_mode)
             pw_hi = (pw >> 4) & 0xFF
             lines.append(
-                f"    !byte {_fmt_byte(frame & 0xFF)}, {_fmt_byte(pw_hi)} "
-                f"; frame {frame}, pw={pw}"
+                f"    !byte {_fmt_byte(f & 0xFF)}, {_fmt_byte(pw_hi)} "
+                f"; frame {f}, pw={pw}"
             )
     lines.append(f"    !byte $ff, $00             ; end-of-table marker")
     lines.append("")
 
-    # ---- Filtertable ----
-    cutoff_hi = (params.filter_cutoff >> 3) & 0xFF
+    # ---- Filtertable (filter sweep) ----
+    cutoff_start = params.effective_filter_cutoff_start()
+    cutoff_end = params.effective_filter_cutoff_end()
+    sweep_frames = params.filter_sweep_frames
     res_filt = ((params.filter_resonance & 0x0F) << 4) | (
         0x01 if params.filter_voice1 else 0x00
     )
     mode_map = {"off": 0x00, "lp": 0x10, "bp": 0x20, "hp": 0x40}
     mode_byte = mode_map.get((params.filter_mode or "off").lower(), 0x00)
+
     lines.append(f"{label_prefix}_filtertable:")
-    lines.append(
-        f"    !byte {_fmt_byte(cutoff_hi)}, {_fmt_byte(res_filt)}, "
-        f"{_fmt_byte(mode_byte)}  ; cutoff_hi, res|rt, mode"
-    )
+    if sweep_frames <= 0 or cutoff_start == cutoff_end:
+        # Static filter
+        cutoff_hi = (cutoff_start >> 3) & 0xFF
+        lines.append(
+            f"    !byte {_fmt_byte(cutoff_hi)}, {_fmt_byte(res_filt)}, "
+            f"{_fmt_byte(mode_byte)}  ; cutoff_hi, res|rt, mode (static)"
+        )
+    else:
+        # Emit a few frames of the sweep
+        num_filt_entries = min(16, sweep_frames + 1)
+        for f in range(num_filt_entries):
+            fc = _compute_filter_cutoff_for_frame(f, cutoff_start, cutoff_end, sweep_frames)
+            fc_hi = (fc >> 3) & 0xFF
+            lines.append(
+                f"    !byte {_fmt_byte(fc_hi)}, {_fmt_byte(res_filt)}, "
+                f"{_fmt_byte(mode_byte)}  ; frame {f}, cutoff={fc}"
+            )
     lines.append(f"    !byte $ff, $00, $00        ; end-of-table marker")
     lines.append("")
 
@@ -236,6 +306,10 @@ def parse_raw_asm(path_or_text: Union[str, Path]) -> Dict:
         "filter_cutoff", "filter_resonance", "filter_voice1",
         "ring_mod", "sync", "gate_frames", "release_frames",
         "volume", "freq_reg",
+        # New int fields
+        "wt_attack_frames", "wt_use_test_bit",
+        "pw_start", "pw_delta", "pw_min", "pw_max",
+        "filter_cutoff_start", "filter_cutoff_end", "filter_sweep_frames",
     }
     out: Dict = {}
     for line in text.splitlines():
@@ -247,7 +321,8 @@ def parse_raw_asm(path_or_text: Union[str, Path]) -> Dict:
             out[key] = float(val)
         elif key == "version":
             out[key] = int(val)
-        elif key in ("waveform", "filter_mode", "chip_model", "source_instrument"):
+        elif key in ("waveform", "filter_mode", "chip_model", "source_instrument",
+                      "wt_attack_waveform", "wt_sustain_waveform", "pw_mode"):
             out[key] = val
         elif key == "pw_table":
             out[key] = _parse_pairlist(val)
@@ -260,7 +335,7 @@ def parse_raw_asm(path_or_text: Union[str, Path]) -> Dict:
             out[key] = val
 
     # Convert 0/1 ints back to bools for bool fields.
-    for b in ("filter_voice1", "ring_mod", "sync"):
+    for b in ("filter_voice1", "ring_mod", "sync", "wt_use_test_bit"):
         if b in out:
             out[b] = bool(out[b])
     return out

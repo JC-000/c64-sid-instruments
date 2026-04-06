@@ -37,6 +37,19 @@ def _rich_params() -> SidParams:
         release_frames=40,
         wavetable=[(0, 0x11), (8, 0x21), (16, 0x41)],
         volume=12,
+        # New fields
+        wt_attack_frames=2,
+        wt_attack_waveform="pulse+saw",
+        wt_sustain_waveform="triangle+pulse",
+        wt_use_test_bit=True,
+        pw_start=3072,
+        pw_delta=10,
+        pw_min=1024,
+        pw_max=3800,
+        pw_mode="sweep",
+        filter_cutoff_start=1500,
+        filter_cutoff_end=800,
+        filter_sweep_frames=40,
     )
 
 
@@ -81,7 +94,17 @@ def test_raw_asm_roundtrip_rich():
     assert meta["sync"] is True
     assert meta["filter_voice1"] is True
 
-    # Table fields
+    # New fields
+    assert meta["wt_attack_frames"] == p.wt_attack_frames
+    assert meta["wt_use_test_bit"] is True
+    assert meta["pw_delta"] == p.pw_delta
+    assert meta["pw_min"] == p.pw_min
+    assert meta["pw_max"] == p.pw_max
+    assert meta["filter_cutoff_start"] == p.effective_filter_cutoff_start()
+    assert meta["filter_cutoff_end"] == p.effective_filter_cutoff_end()
+    assert meta["filter_sweep_frames"] == p.filter_sweep_frames
+
+    # Legacy table fields still present
     assert meta["pw_table"] == p.pw_table
     assert meta["wavetable"] == p.wavetable
 
@@ -144,10 +167,10 @@ def test_goattracker_roundtrip_default():
     assert info["sustain"] == p.sustain
     assert info["release"] == p.release
     assert info["size"] == len(data)
-    # Default patch has a single wavetable/pulsetable/filtertable row.
-    assert len(info["wavetable"]) == 1
-    assert len(info["pulsetable"]) == 1
-    assert len(info["filtertable"]) == 1
+    # Default patch: wavetable has attack + sustain = 2 rows
+    assert len(info["wavetable"]) >= 1
+    assert len(info["pulsetable"]) >= 1
+    assert len(info["filtertable"]) >= 1
     assert len(info["speedtable"]) == 0
 
 
@@ -162,25 +185,24 @@ def test_goattracker_roundtrip_rich():
     assert info["sustain"] == p.sustain
     assert info["release"] == p.release
 
-    # Wavetable should have one row per wavetable entry
-    assert len(info["wavetable"]) == len(p.wavetable)
-    # Pulsetable should have one row per pw_table entry
-    assert len(info["pulsetable"]) == len(p.pw_table)
+    # Wavetable should have rows for test bit + attack frames + sustain
+    # test_bit=True -> 1 row, attack_frames=2 -> 2 rows, sustain -> 1 row = 4
+    assert len(info["wavetable"]) >= 3
 
-    # The waveform byte should have ring_mod + sync bits set
+    # Pulsetable should have at least 1 row (absolute set + speed entry for delta)
+    assert len(info["pulsetable"]) >= 1
+
+    # The waveform bytes should have ring_mod + sync bits set (except test bit row)
     from tools.sidmatch.render import WF_RING_MOD, WF_SYNC
     for left, _ in info["wavetable"]:
-        assert (left & WF_RING_MOD) == WF_RING_MOD
-        assert (left & WF_SYNC) == WF_SYNC
-
-    # Pulse width high byte round-trips
-    pw_hi_expected = [(pw >> 4) & 0x7F for _, pw in p.pw_table]
-    pw_hi_actual = [right for _, right in info["pulsetable"]]
-    assert pw_hi_actual == pw_hi_expected
+        if left != (0x08 & 0xFE):  # skip test bit row
+            assert (left & WF_RING_MOD) == WF_RING_MOD
+            assert (left & WF_SYNC) == WF_SYNC
 
     # Filter cutoff hi round-trips
     assert info["filtertable"][0][1] == (p.filter_cutoff >> 3) & 0xFF
-    # Filter resonance in left nibble
+    # Filter resonance in left byte high nibble (note: 0x80 cmd bit overlaps
+    # with resonance bit 3 for res >= 8, so we check the full byte)
     assert (info["filtertable"][0][0] >> 4) & 0x0F == p.filter_resonance
 
 

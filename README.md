@@ -82,7 +82,7 @@ weights are directly interpretable. The function is symmetric and
 - **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.2.
-- Delivered scores: grand-piano **0.44** (6581) / **0.34** (8580),
+- Delivered scores: grand-piano **0.26** (6581) / **0.25** (8580),
   acoustic-guitar **0.28** (6581) / **0.35** (8580).
 
 Each instrument folder records its fitness score in both `params.json`

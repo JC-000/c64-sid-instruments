@@ -8,8 +8,7 @@ checks that:
     (alignment-tolerant); and
   * the detected fundamental frequency is within 5Hz of 440Hz in both.
 
-Marked as an integration test because the VICE render runs in real time
-(~6 seconds).
+Also tests new wavetable sequence, PW sweep, and filter sweep features.
 """
 
 from __future__ import annotations
@@ -22,7 +21,14 @@ import pytest
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import correlate
 
-from sidmatch.render import SidParams, render_pyresid, render_vice
+from sidmatch.render import (
+    SidParams,
+    render_pyresid,
+    render_vice,
+    compute_gate_release,
+    ATTACK_MS,
+    DECAY_RELEASE_MS,
+)
 
 
 TARGET_HZ = 440.0
@@ -94,16 +100,9 @@ def _read_wav(path: Path) -> np.ndarray:
 
 
 def _trim_to_note(x: np.ndarray, sr: int = SR, seconds: float = 1.0) -> np.ndarray:
-    """Extract a ``seconds``-long window from the stable part of the note.
-
-    The VICE capture contains a power-on click and long stretches of
-    silence; pyresidfp output starts at the attack immediately. We find
-    the loudest window using a ~200ms envelope, then return a window
-    starting ~50ms after the envelope peak (past the attack transient).
-    """
+    """Extract a ``seconds``-long window from the stable part of the note."""
     if len(x) < sr:
         return x
-    # Skip a small leading region that may contain a boot click.
     lead = min(len(x) - 1, int(0.5 * sr)) if len(x) > 2 * sr else 0
     body = x[lead:]
     win = sr // 5  # 200ms
@@ -111,7 +110,6 @@ def _trim_to_note(x: np.ndarray, sr: int = SR, seconds: float = 1.0) -> np.ndarr
         return x
     env = np.sqrt(np.convolve(body ** 2, np.ones(win) / win, mode="valid"))
     peak = int(np.argmax(env)) + lead
-    # start slightly past the peak to be inside the sustain region
     start = peak + int(0.05 * sr)
     end = min(len(x), start + int(seconds * sr))
     start = max(0, end - int(seconds * sr))
@@ -170,3 +168,227 @@ def test_cross_correlation(pyresid_signal, vice_signal):
     b = _trim_to_note(vice_signal, seconds=0.5)
     peak = _max_xcorr(a, b)
     assert peak > 0.85, f"cross-correlation too low: {peak}"
+
+
+# ---------------------------------------------------------------------------
+# Wavetable sequence tests
+# ---------------------------------------------------------------------------
+
+
+def test_wavetable_sequence_produces_audio():
+    """Test bit -> saw attack -> saw sustain produces non-trivial audio."""
+    params = SidParams(
+        waveform="saw",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=8,
+        release=4,
+        filter_mode="off",
+        gate_frames=50,
+        release_frames=25,
+        wt_use_test_bit=True,
+        wt_attack_waveform="saw",
+        wt_sustain_waveform="saw",
+        wt_attack_frames=2,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    assert rms > 1e-3, f"wavetable patch RMS too low: {rms}"
+    assert len(audio) > 0
+
+
+def test_wavetable_different_attack_sustain():
+    """Attack waveform noise, sustain saw - should still produce pitched audio."""
+    params = SidParams(
+        waveform="saw",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=8,
+        release=4,
+        filter_mode="off",
+        gate_frames=50,
+        release_frames=25,
+        wt_attack_waveform="noise",
+        wt_sustain_waveform="saw",
+        wt_attack_frames=2,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    assert rms > 1e-3, f"mixed wavetable patch RMS too low: {rms}"
+
+
+# ---------------------------------------------------------------------------
+# PW sweep tests
+# ---------------------------------------------------------------------------
+
+
+def test_pw_sweep_changes_spectrum():
+    """PW sweep should produce different spectra at start vs end."""
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=0,
+        sustain=15,
+        release=0,
+        filter_mode="off",
+        gate_frames=100,
+        release_frames=10,
+        pw_start=512,
+        pw_delta=20,
+        pw_min=0,
+        pw_max=4095,
+        pw_mode="sweep",
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    assert len(audio) > 0
+
+    # Compare spectra from first quarter and last quarter
+    n = len(audio)
+    q = n // 4
+    first_quarter = audio[:q]
+    last_quarter = audio[3*q:]
+
+    spec_first = np.abs(rfft(first_quarter * np.hanning(len(first_quarter))))
+    spec_last = np.abs(rfft(last_quarter * np.hanning(len(last_quarter))))
+
+    # The spectra should differ since PW is sweeping
+    # Use spectral centroid as a proxy for brightness
+    freqs_first = rfftfreq(len(first_quarter), 1.0 / SR)
+    freqs_last = rfftfreq(len(last_quarter), 1.0 / SR)
+
+    def centroid(spec, freqs):
+        total = spec.sum()
+        if total < 1e-12:
+            return 0.0
+        return float(np.sum(spec * freqs) / total)
+
+    c_first = centroid(spec_first, freqs_first)
+    c_last = centroid(spec_last, freqs_last)
+
+    # They should not be identical (some tolerance for nearly-identical)
+    assert abs(c_first - c_last) > 10.0, (
+        f"PW sweep did not change spectrum: centroid_first={c_first:.1f} "
+        f"centroid_last={c_last:.1f}"
+    )
+
+
+def test_pw_pingpong():
+    """PW ping-pong mode should produce audio."""
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=0,
+        sustain=15,
+        release=0,
+        filter_mode="off",
+        gate_frames=100,
+        release_frames=10,
+        pw_start=2048,
+        pw_delta=30,
+        pw_min=1024,
+        pw_max=3072,
+        pw_mode="pingpong",
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    assert rms > 1e-3, f"PW ping-pong patch RMS too low: {rms}"
+
+
+# ---------------------------------------------------------------------------
+# Filter sweep tests
+# ---------------------------------------------------------------------------
+
+
+def test_filter_sweep_changes_brightness():
+    """Filter sweep should change brightness over time."""
+    params = SidParams(
+        waveform="saw",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=0,
+        sustain=15,
+        release=0,
+        filter_mode="lp",
+        filter_voice1=True,
+        filter_resonance=8,
+        gate_frames=100,
+        release_frames=10,
+        filter_cutoff_start=200,
+        filter_cutoff_end=1800,
+        filter_sweep_frames=80,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    assert len(audio) > 0
+
+    # Compare brightness (spectral centroid) of first vs last quarter
+    n = len(audio)
+    q = n // 4
+    first_quarter = audio[:q]
+    last_quarter = audio[2*q:3*q]
+
+    spec_first = np.abs(rfft(first_quarter * np.hanning(len(first_quarter))))
+    spec_last = np.abs(rfft(last_quarter * np.hanning(len(last_quarter))))
+
+    freqs_first = rfftfreq(len(first_quarter), 1.0 / SR)
+    freqs_last = rfftfreq(len(last_quarter), 1.0 / SR)
+
+    def centroid(spec, freqs):
+        total = spec.sum()
+        if total < 1e-12:
+            return 0.0
+        return float(np.sum(spec * freqs) / total)
+
+    c_first = centroid(spec_first, freqs_first)
+    c_last = centroid(spec_last, freqs_last)
+
+    # Filter opens from 200 to 1800, so last should be brighter
+    assert c_last > c_first, (
+        f"Filter sweep did not increase brightness: "
+        f"centroid_first={c_first:.1f} centroid_last={c_last:.1f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ADSR-aware gate/release computation
+# ---------------------------------------------------------------------------
+
+
+def test_compute_gate_release_basic():
+    """Basic ADSR timing: A=0 (2ms), D=9 (750ms), S=8, R=4 (114ms)."""
+    gate, release = compute_gate_release(0, 9, 8, 4)
+    # gate should cover attack (2ms) + decay (750ms) = 752ms -> ~37 frames + margin
+    assert gate >= 10
+    assert gate <= 200
+    # release for R=4 (114ms) -> ~5 frames + margin
+    assert release >= 10
+    assert release <= 250
+
+
+def test_compute_gate_release_max_sustain():
+    """S=15: decay is skipped, gate = attack + 100ms margin."""
+    gate, release = compute_gate_release(0, 9, 15, 4)
+    # A=0 (2ms), S=15 -> gate_ms = 2 + 100 = 102ms -> ~5 frames + margin
+    assert gate >= 10
+    assert gate <= 50
+
+
+def test_compute_gate_release_extreme_values():
+    """Extreme ADSR: A=15, D=15, S=0, R=15."""
+    gate, release = compute_gate_release(15, 15, 0, 15)
+    # A=15 (8000ms) + D=15 (24000ms) = 32000ms -> capped at 200 frames
+    assert gate == 200
+    # R=15 (24000ms) -> capped at 250 frames
+    assert release == 250
+
+
+def test_compute_gate_release_fast():
+    """Fast ADSR: A=0, D=0, S=0, R=0."""
+    gate, release = compute_gate_release(0, 0, 0, 0)
+    # A=0 (2ms) + D=0 (6ms) = 8ms -> min 10 frames
+    assert gate == 10
+    # R=0 (6ms) -> min 10 frames
+    assert release == 10

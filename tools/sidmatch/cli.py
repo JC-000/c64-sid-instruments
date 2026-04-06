@@ -99,12 +99,13 @@ def _write_report(
         "",
         "## Grid search results",
         "",
-        "| waveform | filter | fitness | evals |",
-        "|---|---|---:|---:|",
+        "| sustain_wf | attack_wf | filter | test_bit | fitness | evals |",
+        "|---|---|---|---|---:|---:|",
     ]
     for row in grid_results_summary:
         lines.append(
-            f"| {row['waveform']} | {row['filter_mode']} "
+            f"| {row['waveform']} | {row.get('attack_wf', '')} | {row['filter_mode']} "
+            f"| {row.get('test_bit', '')} "
             f"| {row['fitness']:.4f} | {row['evaluations']} |"
         )
     (work_dir / "report.md").write_text("\n".join(lines))
@@ -121,67 +122,45 @@ def _run_match_single_chip(
 ) -> OptimizerResult:
     """Run the full match pipeline for a single chip model.
 
+    Uses fast two-phase grid search: screen all discrete combos with a
+    single evaluation each, then refine the top K with full CMA-ES.
     Results are written into *work_dir* (which should already be
     chip-specific, e.g. ``<root>/6581/``).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    per_combo = max(50, args.budget // 8)
+    top_k = getattr(args, "top_k", 3)
 
     print(
-        f"[cli] [{chip_model}] grid_search per_combo_budget={per_combo} "
-        f"workers={args.workers}",
+        f"[cli] [{chip_model}] grid_search: fast screen + top-{top_k} "
+        f"refinement, budget={args.budget} workers={args.workers}",
         flush=True,
     )
     grid_results = grid_search(
         ref_wav_path=sample_path,
         ref_frequency_hz=args.frequency,
         work_dir=work_dir / "grid",
-        per_combo_budget=per_combo,
-        n_workers=args.workers,
-        patience=max(50, per_combo // 2),
-        seed=args.seed,
-    )
-
-    best = grid_results[0]
-    best_combo = {
-        "waveform": best.best_params.waveform,
-        "filter_mode": best.best_params.filter_mode,
-    }
-    print(
-        f"[cli] [{chip_model}] best grid combo: wf={best_combo['waveform']} "
-        f"filter={best_combo['filter_mode']} fitness={best.best_fitness:.4f}",
-        flush=True,
-    )
-
-    # Full run on best combo.
-    fixed = {
-        "waveform": best_combo["waveform"],
-        "filter_mode": best_combo["filter_mode"],
-        "filter_voice1": best_combo["filter_mode"] != "off",
-        "chip_model": chip_model,
-    }
-    print(
-        f"[cli] [{chip_model}] full optimization budget={args.budget} "
-        f"patience={args.patience}",
-        flush=True,
-    )
-    opt = Optimizer(
-        ref_wav_path=sample_path,
-        ref_frequency_hz=args.frequency,
-        fixed_kwargs=fixed,
         budget=args.budget,
         patience=args.patience,
         n_workers=args.workers,
+        top_k=top_k,
+        chip_model=chip_model,
         seed=args.seed,
-        work_dir=work_dir / "final",
-        log_interval=100,
     )
-    result = opt.run()
+
+    result = grid_results[0]
+    best_combo = {
+        "wt_sustain_waveform": result.best_params.effective_sustain_waveform(),
+        "wt_attack_waveform": result.best_params.wt_attack_waveform or "same_as_sustain",
+        "filter_mode": result.best_params.filter_mode,
+        "wt_use_test_bit": result.best_params.wt_use_test_bit,
+    }
     print(
-        f"[cli] [{chip_model}] final best fitness={result.best_fitness:.4f} "
-        f"evals={result.evaluations} time={result.wall_time_s:.1f}s "
-        f"converged={result.converged}",
+        f"[cli] [{chip_model}] best combo: sustain_wf={best_combo['wt_sustain_waveform']} "
+        f"attack_wf={best_combo['wt_attack_waveform']} "
+        f"filter={best_combo['filter_mode']} "
+        f"test_bit={best_combo['wt_use_test_bit']} "
+        f"fitness={result.best_fitness:.4f}",
         flush=True,
     )
 
@@ -199,8 +178,10 @@ def _run_match_single_chip(
     # Report.
     grid_summary = [
         {
-            "waveform": r.best_params.waveform,
+            "waveform": r.best_params.effective_sustain_waveform(),
+            "attack_wf": r.best_params.effective_attack_waveform(),
             "filter_mode": r.best_params.filter_mode,
+            "test_bit": r.best_params.wt_use_test_bit,
             "fitness": r.best_fitness,
             "evaluations": r.evaluations,
         }
@@ -313,8 +294,13 @@ def _instrument_readme(
     title = name.replace("-", " ").title()
     rows = []
     for k in ("waveform", "attack", "decay", "sustain", "release",
-              "pulse_width", "filter_cutoff", "filter_resonance",
-              "filter_mode", "filter_voice1", "volume"):
+              "pulse_width", "pw_start", "pw_delta", "pw_mode",
+              "filter_cutoff", "filter_cutoff_start", "filter_cutoff_end",
+              "filter_sweep_frames", "filter_resonance",
+              "filter_mode", "filter_voice1",
+              "wt_attack_waveform", "wt_sustain_waveform",
+              "wt_attack_frames", "wt_use_test_bit",
+              "volume"):
         if k in params_dict:
             rows.append(f"| {k} | {params_dict[k]} |")
     return _README_TEMPLATE.format(
@@ -483,8 +469,13 @@ def _write_combined_readme(
         params_dict, fitness, version = data
         rows = []
         for k in ("waveform", "attack", "decay", "sustain", "release",
-                  "pulse_width", "filter_cutoff", "filter_resonance",
-                  "filter_mode", "filter_voice1", "volume"):
+                  "pulse_width", "pw_start", "pw_delta", "pw_mode",
+                  "filter_cutoff", "filter_cutoff_start", "filter_cutoff_end",
+                  "filter_sweep_frames", "filter_resonance",
+                  "filter_mode", "filter_voice1",
+                  "wt_attack_waveform", "wt_sustain_waveform",
+                  "wt_attack_frames", "wt_use_test_bit",
+                  "volume"):
             if k in params_dict:
                 rows.append(f"| {k} | {params_dict[k]} |")
         details_parts.append(
@@ -586,6 +577,8 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--patience", type=int, default=500)
     m.add_argument("--workers", type=int, default=None)
     m.add_argument("--seed", type=int, default=0)
+    m.add_argument("--top-k", type=int, default=3,
+                   help="number of top discrete combos to refine with CMA-ES (default: 3)")
     m.add_argument("--work-dir", required=True)
     m.add_argument("--chip-model", default=None, choices=["6581", "8580"],
                    help="run only this chip model (overrides --all-chips)")
