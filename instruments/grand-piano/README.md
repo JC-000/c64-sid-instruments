@@ -13,42 +13,63 @@ Optimized variants are provided for both the MOS 6581 and MOS 8580 SID chips.
 
 ## Chip Variants
 
+| | 6581 | 8580 |
+|---|---|---|
+| **Status** | available | available |
+| **Fitness** | 0.2593 | 0.2534 |
+| **Version** | v3 (pipeline v3) | v3 (pipeline v3) |
+
 ### MOS 6581
 
 | Parameter        | Value           |
 |------------------|-----------------|
-| Waveform         | pulse           |
-| Attack           | 11              |
-| Decay            | 11              |
-| Sustain          | 12              |
-| Release          | 5               |
-| Pulse Width      | 1528            |
-| PW Modulation    | 4-breakpoint table (959 -> 1088 -> 1024 -> 3619) |
+| Sustain Waveform | pulse           |
+| Attack Waveform  | pulse+saw       |
+| Test Bit         | yes (osc reset) |
+| Attack           | 9 (250 ms)      |
+| Decay            | 10 (1500 ms)    |
+| Sustain          | 1               |
+| Release          | 6 (204 ms)      |
+| PW Start         | 1977            |
+| PW Sweep         | -13/frame (sweep down, clamped 2791-2854) |
 | Filter Mode      | lowpass         |
-| Filter Cutoff    | 310 (of 2047)   |
-| Filter Resonance | 10 (of 15)      |
+| Filter Cutoff    | 158 -> 536 over 98 frames (sweep up) |
+| Filter Resonance | 15 (of 15)      |
 | Frequency        | 261.63 Hz (C4)  |
-| **Fitness**      | **0.4369**      |
+| Gate / Release   | 92 / 15 frames  |
+| **Fitness**      | **0.2593**      |
 
 ### MOS 8580
 
 | Parameter        | Value           |
 |------------------|-----------------|
-| Waveform         | saw             |
-| Attack           | 0               |
-| Decay            | 6               |
-| Sustain          | 15              |
-| Release          | 7               |
-| Pulse Width      | 141             |
-| Filter Mode      | bandpass        |
-| Filter Cutoff    | 72              |
+| Sustain Waveform | pulse           |
+| Attack Waveform  | pulse+saw       |
+| Test Bit         | yes (osc reset) |
+| Attack           | 1 (8 ms)        |
+| Decay            | 6 (168 ms)      |
+| Sustain          | 14              |
+| Release          | 10 (1500 ms)    |
+| PW Start         | 672             |
+| PW Sweep         | +41/frame (sweep up, clamped 370-1300) |
+| Filter Mode      | lowpass         |
+| Filter Cutoff    | 63 -> 320 over 100 frames (sweep up) |
 | Filter Resonance | 15 (of 15)      |
 | Frequency        | 261.63 Hz (C4)  |
-| **Fitness**      | **0.3428**      |
+| Gate / Release   | 15 / 80 frames  |
+| **Fitness**      | **0.2534**      |
 
 ## Tags
 
 `piano`, `keyboard`, `percussive`
+
+## Pipeline
+
+Generated with the v3 tracker-style pipeline featuring:
+- Wavetable sequences (test bit reset + attack waveform + sustain waveform)
+- Per-frame PW sweep
+- Per-frame filter cutoff sweep
+- ADSR-aware gate/release frame computation
 
 ## Files
 
