@@ -1,75 +1,77 @@
 # Acoustic Guitar (SID Instrument)
 
-A Commodore 64 SID chip instrument approximating the timbre of an acoustic
-guitar, optimized against the Philharmonia Orchestra E4 forte sample.
-
-Optimized variants are provided for both the MOS 6581 and MOS 8580 SID chips.
-
-## Source and Target
-
-| | |
-|---|---|
-| **Source instrument** | Philharmonia Orchestra, acoustic guitar E4 forte (CC-BY-SA 3.0) |
+A SID chip instrument patch: acoustic-guitar.
 
 ## Chip Variants
 
-### MOS 6581
+| | 6581 | 8580 |
+|---|---|---|
+| **Status** | available | available |
+| **Fitness** | 0.2944 | 0.2867 |
+| **Version** | 2 | 3 |
 
-| Parameter        | Value           |
-|------------------|-----------------|
-| Waveform         | saw             |
-| Attack           | 7               |
-| Decay            | 11              |
-| Sustain          | 3               |
-| Release          | 15              |
-| Pulse Width      | 942             |
-| Filter Mode      | bandpass        |
-| Filter Cutoff    | 84              |
-| Filter Resonance | 11 (of 15)      |
-| Frequency        | 329.63 Hz (E4)  |
-| **Fitness**      | **0.2764**      |
+### 6581 Parameters
 
-### MOS 8580
+| Parameter | Value |
+|---|---|
+| waveform | pulse |
+| attack | 4 |
+| decay | 9 |
+| sustain | 10 |
+| release | 4 |
+| pulse_width | 3810 |
+| pw_start | 3810 |
+| pw_delta | -24 |
+| pw_mode | sweep |
+| filter_cutoff | 383 |
+| filter_cutoff_start | 383 |
+| filter_cutoff_end | 390 |
+| filter_sweep_frames | 65 |
+| filter_resonance | 4 |
+| filter_mode | lp |
+| filter_voice1 | True |
+| wt_attack_waveform | None |
+| wt_sustain_waveform | pulse |
+| wt_attack_frames | 2 |
+| wt_use_test_bit | False |
+| volume | 15 |
 
-| Parameter        | Value           |
-|------------------|-----------------|
-| Waveform         | pulse           |
-| Attack           | 5               |
-| Decay            | 15              |
-| Sustain          | 7               |
-| Release          | 7               |
-| Pulse Width      | 1431            |
-| PW Modulation    | 4-breakpoint table (1448 -> 814 -> 3274 -> 287) |
-| Filter Mode      | bandpass        |
-| Filter Cutoff    | 65              |
-| Filter Resonance | 0 (of 15)       |
-| Frequency        | 329.63 Hz (E4)  |
-| **Fitness**      | **0.3512**      |
+### 8580 Parameters
+
+| Parameter | Value |
+|---|---|
+| waveform | pulse |
+| attack | 0 |
+| decay | 9 |
+| sustain | 7 |
+| release | 5 |
+| pulse_width | 2747 |
+| pw_start | 2747 |
+| pw_delta | 10 |
+| pw_mode | sweep |
+| filter_cutoff | 287 |
+| filter_cutoff_start | 287 |
+| filter_cutoff_end | 456 |
+| filter_sweep_frames | 99 |
+| filter_resonance | 0 |
+| filter_mode | lp |
+| filter_voice1 | True |
+| wt_attack_waveform | None |
+| wt_sustain_waveform | pulse |
+| wt_attack_frames | 4 |
+| wt_use_test_bit | True |
+| volume | 15 |
 
 ## Tags
 
-`acoustic-guitar`, `plucked`, `string`
+`acoustic-guitar`
 
 ## Files
 
-```
-acoustic-guitar/
-  6581/
-    params.json       - Machine-readable SID parameters (6581)
-    raw.asm           - ACME assembler include (6581)
-    goattracker.ins   - GoatTracker 2.x instrument file (6581)
-    sid_render.wav    - pyresidfp render (6581)
-  8580/
-    params.json       - Machine-readable SID parameters (8580)
-    raw.asm           - ACME assembler include (8580)
-    goattracker.ins   - GoatTracker 2.x instrument file (8580)
-    sid_render.wav    - pyresidfp render (8580)
-```
+Each chip subdirectory contains:
 
-## Attribution
-
-Reference sample: **Philharmonia Orchestra** acoustic guitar samples,
-licensed under [CC-BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/).
-The SID instrument parameters and encoded files in this directory are a
-new derived work produced by algorithmic optimization (CMA-ES) against
-spectral features of the reference sample.
+| File | Description |
+|---|---|
+| `params.json` | Machine-readable SID parameters |
+| `raw.asm` | ACME-includable assembly tables |
+| `goattracker.ins` | GoatTracker 2.x instrument binary |
