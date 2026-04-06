@@ -121,25 +121,65 @@ Override via `weights={"harmonics": 3.0, ...}`.
 
 ---
 
+## Matching
+
+By default, `match` runs the full optimization for **both** the 6581 and
+8580 chip models and writes results to `<work-dir>/6581/` and
+`<work-dir>/8580/` respectively:
+
+```
+python3 -m sidmatch.cli match \
+    --sample tools/samples/grand-piano/salamander-piano-C4-v16-ff.wav \
+    --frequency 261.63 \
+    --name grand-piano \
+    --budget 5000 \
+    --work-dir work/grand-piano
+```
+
+A summary comparing the two chips' best fitness is printed at the end.
+
+To run only a single chip variant, pass `--chip-model`:
+
+```
+python3 -m sidmatch.cli match \
+    --chip-model 6581 \
+    --sample ... --frequency 261.63 --name grand-piano \
+    --work-dir work/grand-piano-6581
+```
+
+When `--chip-model` is given, it overrides the default `--all-chips`
+behavior and results are written directly into `<work-dir>/` (no chip
+subdirectory).
+
+---
+
 ## Exporting instruments
 
-After running `match`, use the `export` subcommand to write the result
+After running `match`, use the `export` subcommand to write results
 into `instruments/<name>/<chip>/`:
 
 ```
 python3 -m sidmatch.cli export \
-    --work-dir work/grand-piano-6581 \
-    --name grand-piano \
-    --chip-model 6581 \
-    --fitness-score 0.4369
+    --work-dir work/grand-piano \
+    --name grand-piano
 ```
 
-The `--chip-model` flag (`6581` or `8580`) determines which subdirectory
-the export writes to. Each instrument should be exported twice -- once per
-chip variant.
+When the work directory contains both `6581/` and `8580/` subdirectories
+(the default after a dual-chip `match` run), `export` writes **both**
+variants automatically to `instruments/<name>/6581/` and
+`instruments/<name>/8580/`, plus a combined `README.md` at the
+`instruments/<name>/` level.
 
-This creates (or overwrites) the following files under
-`instruments/<name>/<chip>/`:
+To export only one chip, pass `--chip-model`:
+
+```
+python3 -m sidmatch.cli export \
+    --work-dir work/grand-piano \
+    --name grand-piano \
+    --chip-model 6581
+```
+
+Each chip subdirectory contains:
 
 | File | Content |
 |---|---|
@@ -149,8 +189,7 @@ This creates (or overwrites) the following files under
 | `sid_render.wav` | Copied from work-dir if present |
 
 The top-level `instruments/<name>/README.md` documents both chip
-variants and is maintained separately (or auto-generated on first
-export).
+variants with a comparison table, noting any missing variants.
 
 ### Versioning
 
