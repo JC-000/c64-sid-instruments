@@ -49,11 +49,16 @@ Add a new folder under `instruments/` named in kebab-case (e.g.
 
 ## Fitness score
 
-Each instrument in this library is produced by the CMA-ES optimizer in
-`tools/sidmatch/`. The optimizer renders candidate SID patches, extracts
-perceptual audio features from both the SID render and the reference
-recording, and computes a **weighted distance** between the two feature
-vectors. That scalar distance is the **fitness score**.
+Each instrument in this library is produced by the **tracker-style
+pipeline** in `tools/sidmatch/`. The pipeline uses wavetable sequences,
+PW and filter sweeps, and ADSR-aware render durations -- techniques drawn
+from how real C64 tracker instruments work -- to approximate real-world
+instrument timbres on the SID chip.
+
+The optimizer renders candidate SID patches, extracts perceptual audio
+features from both the SID render and the reference recording, and
+computes a **weighted distance** between the two feature vectors. That
+scalar distance is the **fitness score**.
 
 ### What it measures
 
@@ -82,8 +87,9 @@ weights are directly interpretable. The function is symmetric and
 - **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.2.
-- Delivered scores: grand-piano **0.26** (6581) / **0.25** (8580),
-  acoustic-guitar **0.28** (6581) / **0.35** (8580).
+- Delivered scores (v3 pipeline): grand-piano **0.2593** (6581) /
+  **0.2534** (8580), acoustic-guitar **0.2944** (6581) / **0.2867**
+  (8580).
 
 Each instrument folder records its fitness score in both `params.json`
 (field `fitness_score`) and `raw.asm` (comment `; @meta fitness_score=...`).
@@ -109,9 +115,37 @@ recording** and a specific **target SID chip model**.
 - Every instrument now ships with both **6581** and **8580** variants,
   since the chips' different analog filter implementations cause the
   optimizer to find substantially different timbral strategies for each.
-  For example, the grand piano lands on pulse + lowpass on the 6581 but
-  saw + bandpass on the 8580; the acoustic guitar uses saw + bandpass on
-  the 6581 but pulse + bandpass on the 8580.
+
+### Tracker-style instrument techniques (v3 pipeline)
+
+The v3 pipeline models instruments the way C64 tracker musicians
+actually build them:
+
+- **Wavetable sequences** -- each note plays a frame-by-frame waveform
+  sequence: an optional test-bit reset (oscillator phase sync on frame
+  0), an attack waveform for the first few frames, then a sustain
+  waveform for the rest of the note. This mimics the wavetable
+  programming in GoatTracker / SID-Wizard.
+- **PW sweep** -- the pulse width is not static; it sweeps from
+  `pw_start` by `pw_delta` per frame, clamped between `pw_min` and
+  `pw_max` (with optional ping-pong mode). This produces the rich,
+  animated pulse timbres heard in C64 music.
+- **Filter sweep** -- the filter cutoff interpolates from
+  `filter_cutoff_start` to `filter_cutoff_end` over
+  `filter_sweep_frames` PAL frames, creating natural brightness decay
+  (or attack).
+- **ADSR-aware render duration** -- the gate and release durations are
+  computed from the SID's hardware ADSR timing tables via
+  `compute_gate_release()`. The SID's ADSR is constrained: attack
+  ranges from 2 ms to 8 s (16 steps), decay/release from 6 ms to 24 s
+  (16 steps). The pipeline ensures each render is exactly long enough
+  for the ADSR envelope to play out.
+- **Fast grid search** -- the optimizer screens ~42 discrete
+  combinations of sustain waveform, attack waveform, filter mode, and
+  test-bit usage in seconds (one render per combo with mid-range
+  continuous defaults). The top K combos (default 3, configurable via
+  `--top-k`) are then refined with full CMA-ES optimization. This is
+  dramatically faster than the old exhaustive mini-CMA-ES per combo.
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.
