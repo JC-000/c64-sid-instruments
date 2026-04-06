@@ -4,16 +4,23 @@ A library of reusable SID instruments for making music on the Commodore 64.
 
 ## Layout
 
-Each instrument lives in its own folder under `instruments/`, with every
-supported format side-by-side:
+Each instrument lives in its own folder under `instruments/`, with
+chip-specific variants in separate subdirectories:
 
 ```
 instruments/
   <instrument-name>/
-    goattracker.ins   # GoatTracker 2.x instrument file
-    sidwizard.ins     # SID-Wizard instrument file
-    raw.asm           # ACME-includable register tables
-    README.md         # Description, tags, usage notes, credits
+    README.md         # Description, both variants documented
+    6581/             # MOS 6581 optimized
+      params.json
+      raw.asm
+      goattracker.ins
+      sid_render.wav
+    8580/             # MOS 8580 optimized
+      params.json
+      raw.asm
+      goattracker.ins
+      sid_render.wav
 ```
 
 ## Supported formats
@@ -75,7 +82,8 @@ weights are directly interpretable. The function is symmetric and
 - **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.2.
-- Delivered scores: grand-piano **0.43**, acoustic-guitar **0.28**.
+- Delivered scores: grand-piano **0.44** (6581) / **0.34** (8580),
+  acoustic-guitar **0.28** (6581) / **0.35** (8580).
 
 Each instrument folder records its fitness score in both `params.json`
 (field `fitness_score`) and `raw.asm` (comment `; @meta fitness_score=...`).
@@ -98,10 +106,12 @@ recording** and a specific **target SID chip model**.
   filters are cleaner and closer to spec. An instrument optimized for one
   chip will still play on the other, but the filter response (and
   therefore the timbre) may differ noticeably.
-- The current instruments were optimized using **pyresidfp's default
-  model, which is the MOS 6581**.
-- Future instruments may ship both 6581 and 8580 variants when the
-  timbral difference is significant.
+- Every instrument now ships with both **6581** and **8580** variants,
+  since the chips' different analog filter implementations cause the
+  optimizer to find substantially different timbral strategies for each.
+  For example, the grand piano lands on pulse + lowpass on the 6581 but
+  saw + bandpass on the 8580; the acoustic guitar uses saw + bandpass on
+  the 6581 but pulse + bandpass on the 8580.
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.

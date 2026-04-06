@@ -124,17 +124,22 @@ Override via `weights={"harmonics": 3.0, ...}`.
 ## Exporting instruments
 
 After running `match`, use the `export` subcommand to write the result
-into `instruments/<name>/`:
+into `instruments/<name>/<chip>/`:
 
 ```
 python3 -m sidmatch.cli export \
-    --work-dir work/grand-piano \
+    --work-dir work/grand-piano-6581 \
     --name grand-piano \
+    --chip-model 6581 \
     --fitness-score 0.4369
 ```
 
+The `--chip-model` flag (`6581` or `8580`) determines which subdirectory
+the export writes to. Each instrument should be exported twice -- once per
+chip variant.
+
 This creates (or overwrites) the following files under
-`instruments/<name>/`:
+`instruments/<name>/<chip>/`:
 
 | File | Content |
 |---|---|
@@ -142,13 +147,16 @@ This creates (or overwrites) the following files under
 | `raw.asm` | ACME tables with `; @meta fitness_score=` and `; @meta version=` |
 | `goattracker.ins` | GoatTracker binary (fitness cannot be embedded in binary) |
 | `sid_render.wav` | Copied from work-dir if present |
-| `README.md` | Auto-generated instrument README |
+
+The top-level `instruments/<name>/README.md` documents both chip
+variants and is maintained separately (or auto-generated on first
+export).
 
 ### Versioning
 
 Each export increments the instrument version automatically:
 
-- If `instruments/<name>/params.json` does not exist, version starts at 1.
+- If `instruments/<name>/<chip>/params.json` does not exist, version starts at 1.
 - If it exists, the new version is `old_version + 1`.
 - If the new fitness score is **worse** (higher) than the existing one,
   a warning is printed but the export proceeds. The user may want a
