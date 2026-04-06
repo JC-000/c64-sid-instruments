@@ -31,19 +31,10 @@ The meaning of "left/right" depends on which table:
 * filtertable: left = cutoff/cmd, right = resonance/passband or cutoff hi.
 * speedtable: vibrato speed/depth.
 
-The top bit of the left byte often distinguishes data from commands; see
-``readme.txt``.
-
-Because GoatTracker's pointer scheme is song-global (each instrument refers
-into the song's shared tables), a standalone .ins file still embeds its own
-tables starting at row 1, and on load GoatTracker appends them to the song's
-tables and fixes up the pointers. That is how cadaver's LOADINS works. See
-https://github.com/leafo/goattracker2/blob/master/readme.txt
-
 SidParams fields that map cleanly:
   attack, decay, sustain, release -> AD/SR bytes
-  pulse_width, pw_table          -> pulsetable
-  waveform, wavetable            -> wavetable
+  pulse_width, pw_start/pw_delta  -> pulsetable
+  waveform, wt_attack/sustain    -> wavetable
   filter_cutoff, filter_resonance,
   filter_mode, filter_voice1     -> filtertable
   name (from ``name`` argument)  -> 16-byte name
@@ -62,7 +53,15 @@ from __future__ import annotations
 import struct
 from typing import Dict, List, Tuple
 
-from ..render import SidParams, _waveform_mask, WF_RING_MOD, WF_SYNC
+from ..render import (
+    SidParams,
+    _waveform_mask,
+    _compute_pw_for_frame,
+    _compute_filter_cutoff_for_frame,
+    WF_RING_MOD,
+    WF_SYNC,
+    WF_TEST,
+)
 
 
 GTI5_MAGIC = b"GTI5"
@@ -82,16 +81,37 @@ def _waveform_control_byte(params: SidParams, wf_override: int = None) -> int:
 def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
     """Return ``(left, right)`` rows for the GT wavetable.
 
+    Emits the wavetable sequence: test bit frame, attack waveform frames,
+    sustain waveform. Falls back to legacy wavetable if present.
+
     left  = waveform control byte ($00..$fe; top bit indicates "relative").
     right = note/command arg ($80 = keep playing current note).
     """
     rows: List[Tuple[int, int]] = []
+
+    # Legacy path: if wavetable is explicitly set and no new wt fields
     wt = params.wavetable or []
-    if not wt:
-        rows.append((_waveform_control_byte(params), 0x80))
-    else:
+    if wt and not params.wt_attack_waveform:
         for _, wf_byte in wt:
             rows.append((_waveform_control_byte(params, wf_byte), 0x80))
+        return rows
+
+    # New wavetable sequence
+    attack_wf = _waveform_mask(params.effective_attack_waveform())
+    sustain_wf = _waveform_mask(params.effective_sustain_waveform())
+    wt_attack_frames = max(1, params.wt_attack_frames)
+
+    if params.wt_use_test_bit:
+        # Frame 0: test bit (no gate, GT handles gate separately)
+        rows.append((WF_TEST & 0xFE, 0x80))
+
+    # Attack waveform frames
+    for _ in range(wt_attack_frames):
+        rows.append((_waveform_control_byte(params, attack_wf), 0x80))
+
+    # Sustain waveform (final entry)
+    rows.append((_waveform_control_byte(params, sustain_wf), 0x80))
+
     return rows
 
 
@@ -100,16 +120,37 @@ def _build_pulsetable_rows(params: SidParams) -> List[Tuple[int, int]]:
 
     For an absolute pulse-width "set" GT uses left = $8X (command) and
     right = pw_hi (high 8 bits of the 12-bit pw shifted >>4). See readme.
+
+    If PW sweep is configured, emit sweep entries.
     """
     rows: List[Tuple[int, int]] = []
+
+    # Legacy path
     pw_table = params.pw_table or []
-    if not pw_table:
-        pw_hi = (params.pulse_width >> 4) & 0x7F
-        rows.append((0x80, pw_hi))
-    else:
+    if pw_table and params.pw_start is None:
         for _, pw in pw_table:
             pw_hi = (pw >> 4) & 0x7F
             rows.append((0x80, pw_hi))
+        return rows
+
+    # New PW sweep
+    pw_start = params.effective_pw_start()
+    pw_delta = params.pw_delta
+
+    if pw_delta == 0:
+        # Static PW
+        pw_hi = (pw_start >> 4) & 0x7F
+        rows.append((0x80, pw_hi))
+    else:
+        # In GT, pulsetable speed byte encodes delta direction/speed.
+        # Positive speed = sweep up, negative (using two's complement) = sweep down.
+        # We emit the initial absolute set followed by a speed entry.
+        pw_hi = (pw_start >> 4) & 0x7F
+        rows.append((0x80, pw_hi))  # absolute set
+        # Speed entry: delta per frame (clamped to signed byte range)
+        speed = max(-128, min(127, pw_delta))
+        rows.append((speed & 0xFF, 0x00))
+
     return rows
 
 
@@ -118,20 +159,30 @@ def _build_filtertable_rows(params: SidParams) -> List[Tuple[int, int]]:
 
     Absolute cutoff-set rows in GT use left = $80|res_passband,
     right = cutoff high byte (bits 3..10 of the 11-bit cutoff).
+
+    If filter sweep is configured, emit sweep entries.
     """
     rows: List[Tuple[int, int]] = []
     # mode/passband nibble:
     mode_map = {"off": 0x00, "lp": 0x01, "bp": 0x02, "hp": 0x04}
     passband = mode_map.get((params.filter_mode or "off").lower(), 0x00)
     res_pb = ((params.filter_resonance & 0x0F) << 4) | passband
-    # Filter routing for voice 1:
-    if params.filter_voice1:
-        res_pb |= 0x00  # passband is already in low nibble; routing is
-                         # actually the "filt" bit separately; keep flag in
-                         # right-byte high bit (documented as gt specific).
-    cutoff_hi = (params.filter_cutoff >> 3) & 0xFF
+
+    cutoff_start = params.effective_filter_cutoff_start()
+    cutoff_end = params.effective_filter_cutoff_end()
+    sweep_frames = params.filter_sweep_frames
+
+    cutoff_hi = (cutoff_start >> 3) & 0xFF
     # Top bit of left byte marks "set cutoff" absolute-command in GT:
     rows.append((0x80 | res_pb, cutoff_hi))
+
+    if sweep_frames > 0 and cutoff_start != cutoff_end:
+        # Emit a speed entry for the sweep direction
+        delta = (cutoff_end - cutoff_start) / max(1, sweep_frames)
+        speed = max(-128, min(127, int(round(delta))))
+        if speed != 0:
+            rows.append((speed & 0xFF, 0x00))
+
     return rows
 
 
