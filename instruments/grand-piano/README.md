@@ -3,18 +3,17 @@
 A Commodore 64 SID chip instrument approximating the timbre of a grand piano,
 optimized against the Salamander Grand Piano V3 C4 fortissimo sample.
 
+Optimized variants are provided for both the MOS 6581 and MOS 8580 SID chips.
+
 ## Source and Target
 
 | | |
 |---|---|
 | **Source instrument** | Salamander Grand Piano V3, C4 fortissimo (CC-BY 3.0, Alexander Holm) |
-| **Target SID model** | MOS 6581 |
 
-## Tags
+## Chip Variants
 
-`piano`, `keyboard`, `percussive`, `pulse`, `lowpass`
-
-## Winning Parameters
+### MOS 6581
 
 | Parameter        | Value           |
 |------------------|-----------------|
@@ -29,36 +28,43 @@ optimized against the Salamander Grand Piano V3 C4 fortissimo sample.
 | Filter Cutoff    | 310 (of 2047)   |
 | Filter Resonance | 10 (of 15)      |
 | Frequency        | 261.63 Hz (C4)  |
+| **Fitness**      | **0.4369**      |
 
-## Fitness
+### MOS 8580
 
-- **Final fitness: 0.4369** (weighted multi-feature distance)
-- Evaluations: 2068 (converged via patience at 600)
-- Grid search explored 24 waveform/filter combinations; pulse+LP won at 0.3667
-- Full CMA-ES refinement lowered to 0.4369
+| Parameter        | Value           |
+|------------------|-----------------|
+| Waveform         | saw             |
+| Attack           | 0               |
+| Decay            | 6               |
+| Sustain          | 15              |
+| Release          | 7               |
+| Pulse Width      | 141             |
+| Filter Mode      | bandpass        |
+| Filter Cutoff    | 72              |
+| Filter Resonance | 15 (of 15)      |
+| Frequency        | 261.63 Hz (C4)  |
+| **Fitness**      | **0.3428**      |
 
-## Spectral Comparison
+## Tags
 
-The SID pulse wave with lowpass filtering at cutoff 310 and resonance 10
-produces a dark, muffled tone that captures the piano's fundamental and lower
-partials. The aggressive LP filter rolls off the upper harmonics, mimicking
-the damped quality of a piano's struck string. The slow attack (11) and
-long decay (11) approximate the piano's percussive onset and sustained ring,
-though the SID's discrete ADSR steps produce a noticeably different envelope
-shape than a real piano's continuous amplitude curve.
-
-Key differences from a real piano:
-- No inharmonicity (SID partials are perfectly harmonic)
-- Simpler spectral evolution (no per-partial decay rates)
-- Coarser amplitude envelope (16 discrete ADSR levels)
-- No sympathetic resonance or pedal effects
+`piano`, `keyboard`, `percussive`
 
 ## Files
 
-- `raw.asm` - ACME assembler include (verified with `acme`)
-- `goattracker.ins` - GoatTracker 2.x instrument file (GTI5 format)
-- `params.json` - Machine-readable SID parameters
-- `sid_render.wav` - pyresidfp render of the winning patch (2s, 44.1kHz)
+```
+grand-piano/
+  6581/
+    params.json       - Machine-readable SID parameters (6581)
+    raw.asm           - ACME assembler include (6581)
+    goattracker.ins   - GoatTracker 2.x instrument file (6581)
+    sid_render.wav    - pyresidfp render (6581)
+  8580/
+    params.json       - Machine-readable SID parameters (8580)
+    raw.asm           - ACME assembler include (8580)
+    goattracker.ins   - GoatTracker 2.x instrument file (8580)
+    sid_render.wav    - pyresidfp render (8580)
+```
 
 ## Attribution
 
