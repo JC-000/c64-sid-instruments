@@ -36,6 +36,12 @@ WF_RING_MOD = 0x04
 WF_TEST = 0x08
 WF_GATE = 0x01
 
+# ---------------------------------------------------------------------------
+# SID ADSR timing tables (hardware-defined, in milliseconds)
+# ---------------------------------------------------------------------------
+ATTACK_MS = [2, 8, 16, 24, 38, 56, 68, 80, 100, 250, 500, 800, 1000, 3000, 5000, 8000]
+DECAY_RELEASE_MS = [6, 24, 48, 72, 114, 168, 204, 240, 300, 750, 1500, 2400, 3000, 9000, 15000, 24000]
+
 
 def _waveform_mask(name: str) -> int:
     """Convert a human-friendly waveform string to a SID control-reg bitmask.
@@ -88,6 +94,31 @@ def hz_to_sid_freq(hz: float, clock: float = PAL_CLOCK_HZ) -> int:
     return max(0, min(0xFFFF, reg))
 
 
+def compute_gate_release(attack: int, decay: int, sustain: int, release: int) -> Tuple[int, int]:
+    """Compute gate_frames and release_frames so full ADSR plays out.
+
+    Uses the hardware ADSR timing tables. Returns (gate_frames, release_frames)
+    in PAL frames (50 Hz).
+    """
+    attack_ms = ATTACK_MS[max(0, min(15, attack))]
+    decay_ms = DECAY_RELEASE_MS[max(0, min(15, decay))]
+    release_ms = DECAY_RELEASE_MS[max(0, min(15, release))]
+
+    # Gate must cover attack + enough decay to reach sustain level.
+    # If sustain == 15, decay is skipped (already at peak = sustain).
+    if sustain >= 15:
+        gate_ms = attack_ms + 100  # just past attack
+    else:
+        gate_ms = attack_ms + decay_ms
+
+    gate_frames = max(10, min(200, int(gate_ms / 20) + 5))  # PAL frames, with margin
+
+    # Release: let it play out, but cap at 5 seconds (250 frames).
+    release_frames = max(10, min(250, int(release_ms / 20) + 5))
+
+    return gate_frames, release_frames
+
+
 @dataclass
 class SidParams:
     """Parameters for a single SID voice patch.
@@ -98,13 +129,37 @@ class SidParams:
 
     Attributes:
         waveform: "triangle", "saw", "pulse", "noise" or a ``+``-joined
-            combination (e.g. ``"triangle+pulse"``).
+            combination (e.g. ``"triangle+pulse"``). Also serves as alias
+            for sustain waveform in simple patches.
         attack, decay, sustain, release: standard SID ADSR nibbles (0-15).
         pulse_width: static pulse width 0-4095 (only meaningful for pulse
-            waveforms). Ignored if ``pw_table`` is given.
-        pw_table: optional list of ``(frame, pw_value)`` tuples; the pulse
-            width is updated on those frames.
-        filter_cutoff: 11-bit filter cutoff 0-2047.
+            waveforms). Ignored if pw_start/pw_delta are used.
+        pw_table: optional list of ``(frame, pw_value)`` tuples; legacy
+            support. Superseded by pw_start/pw_delta/pw_min/pw_max/pw_mode.
+
+        -- Wavetable sequence --
+        wt_attack_frames: number of frames the attack waveform plays (1-5).
+        wt_attack_waveform: waveform for attack phase ("noise", "pulse+saw",
+            etc.). Empty or None means same as waveform/sustain.
+        wt_sustain_waveform: waveform for sustain phase. Empty or None
+            means same as waveform.
+        wt_use_test_bit: whether frame 0 uses test bit ($08) to reset
+            oscillator phase.
+
+        -- PW sweep --
+        pw_start: starting pulse width (0-4095).
+        pw_delta: change per frame (positive=sweep up, negative=down, 0=static).
+        pw_min: lower bound for ping-pong (0-4095).
+        pw_max: upper bound for ping-pong (0-4095).
+        pw_mode: "sweep" or "pingpong".
+
+        -- Filter sweep --
+        filter_cutoff_start: starting filter cutoff (0-2047).
+        filter_cutoff_end: sweep target (0-2047).
+        filter_sweep_frames: how many frames to reach end (0=static).
+
+        filter_cutoff: legacy static cutoff (0-2047). Used if
+            filter_cutoff_start is None.
         filter_resonance: 0-15.
         filter_mode: "lp", "bp", "hp" or "off".
         filter_voice1: route voice 1 through the filter.
@@ -113,15 +168,13 @@ class SidParams:
         frequency: note pitch in Hz (converted to SID freq register).
         gate_frames: frames to hold gate on (50Hz PAL).
         release_frames: frames after gate-off to keep capturing.
-        wavetable: optional list of ``(frame, waveform_byte)`` overrides that
-            replace the control-register waveform bits on specific frames
-            (the GATE bit is preserved).
+        wavetable: optional list of ``(frame, waveform_byte)`` overrides
+            (legacy). Superseded by wt_attack_waveform/wt_sustain_waveform.
         volume: master volume 0-15.
         chip_model: target SID chip model, ``"6581"`` or ``"8580"``.
             ``None`` means unspecified (pyresidfp defaults to MOS6581).
         source_instrument: free-text description of the reference recording
-            used during optimization (e.g. ``"Salamander Grand Piano V3, C4
-            fortissimo"``).
+            used during optimization.
     """
 
     waveform: str = "saw"
@@ -145,7 +198,51 @@ class SidParams:
     chip_model: Optional[str] = None
     source_instrument: Optional[str] = None
 
+    # -- Wavetable sequence --
+    wt_attack_frames: int = 1
+    wt_attack_waveform: Optional[str] = None
+    wt_sustain_waveform: Optional[str] = None
+    wt_use_test_bit: bool = False
+
+    # -- PW sweep --
+    pw_start: Optional[int] = None
+    pw_delta: int = 0
+    pw_min: int = 0
+    pw_max: int = 4095
+    pw_mode: str = "sweep"
+
+    # -- Filter sweep --
+    filter_cutoff_start: Optional[int] = None
+    filter_cutoff_end: Optional[int] = None
+    filter_sweep_frames: int = 0
+
     # ---- derived helpers ----
+
+    def effective_sustain_waveform(self) -> str:
+        """Return the sustain waveform name."""
+        return self.wt_sustain_waveform or self.waveform or "saw"
+
+    def effective_attack_waveform(self) -> str:
+        """Return the attack waveform name."""
+        return self.wt_attack_waveform or self.effective_sustain_waveform()
+
+    def effective_pw_start(self) -> int:
+        """Return the effective starting pulse width."""
+        if self.pw_start is not None:
+            return self.pw_start & 0x0FFF
+        return self.pulse_width & 0x0FFF
+
+    def effective_filter_cutoff_start(self) -> int:
+        """Return the effective starting filter cutoff."""
+        if self.filter_cutoff_start is not None:
+            return self.filter_cutoff_start & 0x07FF
+        return self.filter_cutoff & 0x07FF
+
+    def effective_filter_cutoff_end(self) -> int:
+        """Return the effective ending filter cutoff."""
+        if self.filter_cutoff_end is not None:
+            return self.filter_cutoff_end & 0x07FF
+        return self.effective_filter_cutoff_start()
 
     def control_byte(self, gate: bool = True) -> int:
         wf = _waveform_mask(self.waveform)
@@ -178,6 +275,58 @@ class SidParams:
         return int(self.gate_frames + self.release_frames)
 
 
+def _compute_pw_for_frame(frame: int, pw_start: int, pw_delta: int,
+                          pw_min: int, pw_max: int, mode: str) -> int:
+    """Compute pulse width for a given frame according to sweep parameters."""
+    if pw_delta == 0:
+        return max(pw_min, min(pw_max, pw_start))
+
+    if mode == "pingpong":
+        # ping-pong: sweep back and forth between pw_min and pw_max
+        span = max(1, pw_max - pw_min)
+        raw_offset = abs(pw_delta) * frame
+        # how many half-cycles
+        phase = raw_offset % (2 * span)
+        if phase <= span:
+            val = pw_start + (pw_delta // abs(pw_delta)) * phase if pw_delta != 0 else pw_start
+        else:
+            val = pw_start + (pw_delta // abs(pw_delta)) * (2 * span - phase) if pw_delta != 0 else pw_start
+        # Simple approach: linear sweep with reflection at boundaries
+        pw = pw_start + pw_delta * frame
+        # reflect at boundaries
+        while True:
+            if pw > pw_max:
+                pw = 2 * pw_max - pw
+                pw_delta = -pw_delta
+            elif pw < pw_min:
+                pw = 2 * pw_min - pw
+                pw_delta = -pw_delta
+            else:
+                break
+            # safety valve
+            if abs(pw - pw_start) > 2 * (pw_max - pw_min + 1):
+                pw = max(pw_min, min(pw_max, pw))
+                break
+        return max(0, min(4095, pw))
+    else:
+        # simple sweep: clamp at boundaries
+        pw = pw_start + pw_delta * frame
+        return max(pw_min, min(pw_max, max(0, min(4095, pw))))
+
+
+def _compute_filter_cutoff_for_frame(frame: int, cutoff_start: int,
+                                     cutoff_end: int, sweep_frames: int) -> int:
+    """Compute filter cutoff for a given frame according to sweep parameters."""
+    if sweep_frames <= 0 or cutoff_start == cutoff_end:
+        return cutoff_start
+    if frame >= sweep_frames:
+        return cutoff_end
+    # linear interpolation
+    frac = frame / sweep_frames
+    val = cutoff_start + frac * (cutoff_end - cutoff_start)
+    return max(0, min(2047, int(round(val))))
+
+
 # ---------------------------------------------------------------------------
 # pyresidfp backend
 # ---------------------------------------------------------------------------
@@ -208,15 +357,17 @@ def render_pyresid(
 ) -> np.ndarray:
     """Render ``params`` with pyresidfp.
 
-    Parameters
-    ----------
-    params : SidParams
-        The voice patch to render.
-    sample_rate : int
-        Output sample rate in Hz.
-    chip_model : str or None
-        ``"6581"`` or ``"8580"``.  ``None`` uses pyresidfp's default
-        (MOS6581).
+    Implements tracker-style per-frame wavetable sequence, PW sweep, and
+    filter sweep.  The rendering sequence is:
+
+    1. Frame 0: if wt_use_test_bit, write test bit ($08, no gate) to reset
+       oscillator phase.
+    2. Frame 1..wt_attack_frames: write attack waveform + gate.
+    3. Frame wt_attack_frames+1 onward: write sustain waveform + gate.
+    4. Each frame: update PW register according to PW sweep params.
+    5. Each frame: update filter cutoff according to filter sweep params.
+    6. At gate_frames: gate off (clear gate bit, keep waveform).
+    7. Continue for release_frames more frames.
 
     Returns a mono float32 numpy array in ``[-1, 1]``.
     """
@@ -234,8 +385,28 @@ def render_pyresid(
     sid.reset()
 
     freq_reg = hz_to_sid_freq(params.frequency, PAL_CLOCK_HZ)
-    pw = params.pulse_width & 0x0FFF
-    cutoff = params.filter_cutoff & 0x07FF
+
+    # Effective PW and filter parameters
+    pw_start = params.effective_pw_start()
+    pw_delta = params.pw_delta
+    pw_min = params.pw_min
+    pw_max = params.pw_max
+    pw_mode = params.pw_mode or "sweep"
+
+    cutoff_start = params.effective_filter_cutoff_start()
+    cutoff_end = params.effective_filter_cutoff_end()
+    sweep_frames = params.filter_sweep_frames
+
+    # Waveform masks
+    sustain_wf = _waveform_mask(params.effective_sustain_waveform())
+    attack_wf = _waveform_mask(params.effective_attack_waveform())
+    wt_attack_frames = max(1, params.wt_attack_frames)
+
+    # Legacy wavetable/pw_table support
+    legacy_wt = dict(params.wavetable or [])
+    legacy_pw = dict(params.pw_table or [])
+    use_legacy_wt = bool(params.wavetable) and not params.wt_attack_waveform
+    use_legacy_pw = bool(params.pw_table) and params.pw_start is None
 
     # Master volume / filter mode
     sid.write_register(
@@ -244,14 +415,16 @@ def render_pyresid(
     sid.write_register(
         WritableRegister.Filter_Res_Filt, params.filter_res_filt_byte()
     )
-    # Filter cutoff: lo=3 bits, hi=8 bits (total 11 bits).
+    # Initial filter cutoff
+    cutoff = cutoff_start & 0x07FF
     sid.write_register(WritableRegister.Filter_Fc_Lo, cutoff & 0x07)
     sid.write_register(WritableRegister.Filter_Fc_Hi, (cutoff >> 3) & 0xFF)
 
     # Voice 1 frequency
     sid.write_register(WritableRegister.Voice1_Freq_Lo, freq_reg & 0xFF)
     sid.write_register(WritableRegister.Voice1_Freq_Hi, (freq_reg >> 8) & 0xFF)
-    # Voice 1 pulse width
+    # Voice 1 initial pulse width
+    pw = pw_start & 0x0FFF
     sid.write_register(WritableRegister.Voice1_Pw_Lo, pw & 0xFF)
     sid.write_register(WritableRegister.Voice1_Pw_Hi, (pw >> 8) & 0x0F)
     # ADSR
@@ -260,18 +433,11 @@ def render_pyresid(
         WritableRegister.Voice1_Sustain_Release, params.sr_byte()
     )
 
-    # Build per-frame schedule of waveform/pw updates.
-    pw_lookup = dict(params.pw_table or [])
-    wt_lookup = dict(params.wavetable or [])
-
     samples: List[int] = []
     frame_dur = timedelta(seconds=1.0 / PAL_FRAME_HZ)
 
-    base_wf = _waveform_mask(params.waveform)
-
-    def wf_for_frame(f: int, gate: bool) -> int:
-        wf = wt_lookup.get(f, base_wf)
-        cb = wf
+    def _build_control(wf_mask: int, gate: bool) -> int:
+        cb = wf_mask
         if params.ring_mod:
             cb |= WF_RING_MOD
         if params.sync:
@@ -280,30 +446,69 @@ def render_pyresid(
             cb |= WF_GATE
         return cb & 0xFF
 
-    # Gate ON
-    sid.write_register(
-        WritableRegister.Voice1_Control_Reg, wf_for_frame(0, True)
-    )
+    def _wf_for_frame_legacy(f: int, gate: bool) -> int:
+        wf = legacy_wt.get(f, _waveform_mask(params.waveform))
+        return _build_control(wf, gate)
 
+    def _wf_for_frame(f: int, gate: bool) -> int:
+        """Determine waveform control byte for frame f using wavetable sequence."""
+        if use_legacy_wt:
+            return _wf_for_frame_legacy(f, gate)
+
+        if params.wt_use_test_bit and f == 0:
+            # Test bit: $08, no gate (resets oscillator phase)
+            return WF_TEST
+        if f <= wt_attack_frames:
+            return _build_control(attack_wf, gate)
+        return _build_control(sustain_wf, gate)
+
+    # --- Gate ON phase ---
     for f in range(params.gate_frames):
-        if f in pw_lookup:
-            new_pw = pw_lookup[f] & 0x0FFF
+        # Update waveform
+        ctrl = _wf_for_frame(f, gate=True)
+        sid.write_register(WritableRegister.Voice1_Control_Reg, ctrl)
+
+        # Update PW
+        if use_legacy_pw:
+            if f in legacy_pw:
+                new_pw = legacy_pw[f] & 0x0FFF
+                sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
+                sid.write_register(
+                    WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
+                )
+        else:
+            new_pw = _compute_pw_for_frame(f, pw_start, pw_delta, pw_min, pw_max, pw_mode)
             sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
             sid.write_register(
                 WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
             )
-        if f in wt_lookup or f == 0:
-            sid.write_register(
-                WritableRegister.Voice1_Control_Reg, wf_for_frame(f, True)
-            )
+
+        # Update filter cutoff
+        new_cutoff = _compute_filter_cutoff_for_frame(f, cutoff_start, cutoff_end, sweep_frames)
+        sid.write_register(WritableRegister.Filter_Fc_Lo, new_cutoff & 0x07)
+        sid.write_register(WritableRegister.Filter_Fc_Hi, (new_cutoff >> 3) & 0xFF)
+
         chunk = sid.clock(frame_dur)
         samples.extend(chunk)
 
-    # Gate OFF
-    sid.write_register(
-        WritableRegister.Voice1_Control_Reg, wf_for_frame(params.gate_frames, False)
-    )
+    # --- Gate OFF phase ---
+    gate_off_wf = sustain_wf if not use_legacy_wt else _waveform_mask(params.waveform)
+    gate_off_ctrl = _build_control(gate_off_wf, gate=False)
+    sid.write_register(WritableRegister.Voice1_Control_Reg, gate_off_ctrl)
+
     for f in range(params.release_frames):
+        # Continue PW and filter sweeps during release
+        abs_frame = params.gate_frames + f
+        if not use_legacy_pw:
+            new_pw = _compute_pw_for_frame(abs_frame, pw_start, pw_delta, pw_min, pw_max, pw_mode)
+            sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
+            sid.write_register(
+                WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
+            )
+        new_cutoff = _compute_filter_cutoff_for_frame(abs_frame, cutoff_start, cutoff_end, sweep_frames)
+        sid.write_register(WritableRegister.Filter_Fc_Lo, new_cutoff & 0x07)
+        sid.write_register(WritableRegister.Filter_Fc_Hi, (new_cutoff >> 3) & 0xFF)
+
         chunk = sid.clock(frame_dur)
         samples.extend(chunk)
 

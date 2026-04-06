@@ -99,12 +99,13 @@ def _write_report(
         "",
         "## Grid search results",
         "",
-        "| waveform | filter | fitness | evals |",
-        "|---|---|---:|---:|",
+        "| sustain_wf | attack_wf | filter | test_bit | fitness | evals |",
+        "|---|---|---|---|---:|---:|",
     ]
     for row in grid_results_summary:
         lines.append(
-            f"| {row['waveform']} | {row['filter_mode']} "
+            f"| {row['waveform']} | {row.get('attack_wf', '')} | {row['filter_mode']} "
+            f"| {row.get('test_bit', '')} "
             f"| {row['fitness']:.4f} | {row['evaluations']} |"
         )
     (work_dir / "report.md").write_text("\n".join(lines))
@@ -145,20 +146,27 @@ def _run_match_single_chip(
 
     best = grid_results[0]
     best_combo = {
-        "waveform": best.best_params.waveform,
+        "wt_sustain_waveform": best.best_params.effective_sustain_waveform(),
+        "wt_attack_waveform": best.best_params.wt_attack_waveform or "same_as_sustain",
         "filter_mode": best.best_params.filter_mode,
+        "wt_use_test_bit": best.best_params.wt_use_test_bit,
     }
     print(
-        f"[cli] [{chip_model}] best grid combo: wf={best_combo['waveform']} "
-        f"filter={best_combo['filter_mode']} fitness={best.best_fitness:.4f}",
+        f"[cli] [{chip_model}] best grid combo: sustain_wf={best_combo['wt_sustain_waveform']} "
+        f"attack_wf={best_combo['wt_attack_waveform']} "
+        f"filter={best_combo['filter_mode']} "
+        f"test_bit={best_combo['wt_use_test_bit']} "
+        f"fitness={best.best_fitness:.4f}",
         flush=True,
     )
 
     # Full run on best combo.
     fixed = {
-        "waveform": best_combo["waveform"],
+        "wt_sustain_waveform": best_combo["wt_sustain_waveform"],
+        "wt_attack_waveform": best_combo["wt_attack_waveform"],
         "filter_mode": best_combo["filter_mode"],
         "filter_voice1": best_combo["filter_mode"] != "off",
+        "wt_use_test_bit": best_combo["wt_use_test_bit"],
         "chip_model": chip_model,
     }
     print(
@@ -199,8 +207,10 @@ def _run_match_single_chip(
     # Report.
     grid_summary = [
         {
-            "waveform": r.best_params.waveform,
+            "waveform": r.best_params.effective_sustain_waveform(),
+            "attack_wf": r.best_params.effective_attack_waveform(),
             "filter_mode": r.best_params.filter_mode,
+            "test_bit": r.best_params.wt_use_test_bit,
             "fitness": r.best_fitness,
             "evaluations": r.evaluations,
         }
@@ -313,8 +323,13 @@ def _instrument_readme(
     title = name.replace("-", " ").title()
     rows = []
     for k in ("waveform", "attack", "decay", "sustain", "release",
-              "pulse_width", "filter_cutoff", "filter_resonance",
-              "filter_mode", "filter_voice1", "volume"):
+              "pulse_width", "pw_start", "pw_delta", "pw_mode",
+              "filter_cutoff", "filter_cutoff_start", "filter_cutoff_end",
+              "filter_sweep_frames", "filter_resonance",
+              "filter_mode", "filter_voice1",
+              "wt_attack_waveform", "wt_sustain_waveform",
+              "wt_attack_frames", "wt_use_test_bit",
+              "volume"):
         if k in params_dict:
             rows.append(f"| {k} | {params_dict[k]} |")
     return _README_TEMPLATE.format(
@@ -483,8 +498,13 @@ def _write_combined_readme(
         params_dict, fitness, version = data
         rows = []
         for k in ("waveform", "attack", "decay", "sustain", "release",
-                  "pulse_width", "filter_cutoff", "filter_resonance",
-                  "filter_mode", "filter_voice1", "volume"):
+                  "pulse_width", "pw_start", "pw_delta", "pw_mode",
+                  "filter_cutoff", "filter_cutoff_start", "filter_cutoff_end",
+                  "filter_sweep_frames", "filter_resonance",
+                  "filter_mode", "filter_voice1",
+                  "wt_attack_waveform", "wt_sustain_waveform",
+                  "wt_attack_frames", "wt_use_test_bit",
+                  "volume"):
             if k in params_dict:
                 rows.append(f"| {k} | {params_dict[k]} |")
         details_parts.append(

@@ -13,13 +13,14 @@ from sidmatch.optimize import (
     Optimizer,
     encode_params,
     decode_params,
+    compute_render_duration,
     BOUNDS_LOW,
     BOUNDS_HIGH,
     N_DIMS,
     sid_params_to_dict,
     sid_params_from_dict,
 )
-from sidmatch.render import SidParams, render_pyresid
+from sidmatch.render import SidParams, render_pyresid, ATTACK_MS, DECAY_RELEASE_MS
 from sidmatch.features import CANONICAL_SR
 
 
@@ -39,6 +40,19 @@ _KNOWN_PATCH = SidParams(
     gate_frames=50,
     release_frames=50,
     volume=15,
+    # New fields with defaults
+    wt_attack_frames=1,
+    wt_attack_waveform=None,
+    wt_sustain_waveform=None,
+    wt_use_test_bit=False,
+    pw_start=2048,
+    pw_delta=0,
+    pw_min=0,
+    pw_max=4095,
+    pw_mode="sweep",
+    filter_cutoff_start=1024,
+    filter_cutoff_end=1024,
+    filter_sweep_frames=0,
 )
 
 
@@ -60,37 +74,38 @@ def test_encode_decode_roundtrip():
     assert np.all(x <= BOUNDS_HIGH + 1e-9)
 
     fixed = {
-        "waveform": "saw",
+        "wt_sustain_waveform": "saw",
         "filter_mode": "off",
         "filter_voice1": False,
         "frequency": 440.0,
-        "gate_frames": 50,
-        "release_frames": 50,
     }
     p = decode_params(x, fixed)
     assert p.attack == _KNOWN_PATCH.attack
     assert p.decay == _KNOWN_PATCH.decay
     assert p.sustain == _KNOWN_PATCH.sustain
     assert p.release == _KNOWN_PATCH.release
-    assert p.pulse_width == _KNOWN_PATCH.pulse_width
-    assert p.filter_cutoff == _KNOWN_PATCH.filter_cutoff
+    assert p.effective_pw_start() == _KNOWN_PATCH.effective_pw_start()
+    assert p.effective_filter_cutoff_start() == _KNOWN_PATCH.effective_filter_cutoff_start()
     assert p.filter_resonance == _KNOWN_PATCH.filter_resonance
-    assert p.waveform == "saw"
+    assert p.effective_sustain_waveform() == "saw"
     assert p.filter_mode == "off"
+    # Gate/release frames are computed from ADSR, not fixed
+    assert p.gate_frames > 0
+    assert p.release_frames > 0
 
 
 def test_decode_bounds_clipping():
     # Out-of-bounds values should clip to ranges.
     x = np.full(N_DIMS, 1e6)
-    p = decode_params(x, {"waveform": "saw", "filter_mode": "off"})
+    p = decode_params(x, {"wt_sustain_waveform": "saw", "filter_mode": "off"})
     assert p.attack == 15
-    assert p.pulse_width == 4095
-    assert p.filter_cutoff == 2047
+    assert p.effective_pw_start() == 4095
+    assert p.effective_filter_cutoff_start() == 2047
 
     x = np.full(N_DIMS, -1e6)
-    p = decode_params(x, {"waveform": "saw", "filter_mode": "off"})
+    p = decode_params(x, {"wt_sustain_waveform": "saw", "filter_mode": "off"})
     assert p.attack == 0
-    assert p.pulse_width == 0
+    assert p.effective_pw_start() == 0
 
 
 def test_sid_params_json_roundtrip():
@@ -104,6 +119,41 @@ def test_sid_params_json_roundtrip():
 
 
 # --------------------------------------------------------------------------
+# compute_render_duration tests
+# --------------------------------------------------------------------------
+
+def test_compute_render_duration_sane_values():
+    """Verify compute_render_duration produces sane values for all ADSR combos."""
+    for a in range(16):
+        for d in [0, 7, 15]:
+            for s in [0, 8, 15]:
+                for r in [0, 7, 15]:
+                    gate, release = compute_render_duration(a, d, s, r)
+                    assert 10 <= gate <= 200, f"gate={gate} for A={a} D={d} S={s} R={r}"
+                    assert 10 <= release <= 250, f"release={release} for A={a} D={d} S={s} R={r}"
+
+
+def test_compute_render_duration_monotonic_attack():
+    """Higher attack values should produce longer gate times (when D/S/R fixed)."""
+    prev_gate = 0
+    for a in [0, 4, 8, 12, 15]:
+        gate, _ = compute_render_duration(a, 5, 8, 5)
+        assert gate >= prev_gate, f"gate not monotonic: A={a} gate={gate} prev={prev_gate}"
+        prev_gate = gate
+
+
+def test_compute_render_duration_extreme():
+    """Extreme ADSR values should still produce bounded results."""
+    gate, release = compute_render_duration(15, 15, 0, 15)
+    assert gate == 200  # capped
+    assert release == 250  # capped
+
+    gate, release = compute_render_duration(0, 0, 15, 0)
+    assert gate >= 10  # minimum
+    assert release >= 10  # minimum
+
+
+# --------------------------------------------------------------------------
 # Recovery test
 # --------------------------------------------------------------------------
 
@@ -113,12 +163,10 @@ def test_recovery_known_patch(tmp_path):
     ref_wav = _synthesize_ref_wav(tmp_path)
 
     fixed = {
-        "waveform": "saw",
+        "wt_sustain_waveform": "saw",
         "filter_mode": "off",
         "filter_voice1": False,
         "frequency": 440.0,
-        "gate_frames": 50,
-        "release_frames": 50,
     }
     opt = Optimizer(
         ref_wav_path=ref_wav,
@@ -150,12 +198,10 @@ def test_recovery_known_patch(tmp_path):
 def test_parallel_smoke(tmp_path):
     ref_wav = _synthesize_ref_wav(tmp_path)
     fixed = {
-        "waveform": "saw",
+        "wt_sustain_waveform": "saw",
         "filter_mode": "off",
         "filter_voice1": False,
         "frequency": 440.0,
-        "gate_frames": 50,
-        "release_frames": 50,
     }
     opt = Optimizer(
         ref_wav_path=ref_wav,
@@ -183,12 +229,10 @@ def test_checkpoint_restore(tmp_path):
     ref_wav = _synthesize_ref_wav(tmp_path)
     work_dir = tmp_path / "work"
     fixed = {
-        "waveform": "saw",
+        "wt_sustain_waveform": "saw",
         "filter_mode": "off",
         "filter_voice1": False,
         "frequency": 440.0,
-        "gate_frames": 50,
-        "release_frames": 50,
     }
     opt = Optimizer(
         ref_wav_path=ref_wav,
@@ -214,5 +258,5 @@ def test_checkpoint_restore(tmp_path):
 
     # best_params must reload into a SidParams.
     p = sid_params_from_dict(state["best_params"])
-    assert p.waveform == "saw"
+    assert p.effective_sustain_waveform() == "saw"
     assert p.filter_mode == "off"

@@ -5,7 +5,8 @@ for a patch whose rendered audio matches a reference WAV (as scored by
 :func:`sidmatch.fitness.distance`).
 
 The decision vector is continuous. Discrete fields (waveform,
-filter_mode) are fixed per run and passed via ``fixed_kwargs``.
+filter_mode, wt_use_test_bit, wt_attack_waveform) are fixed per run
+and passed via ``fixed_kwargs``.
 """
 
 from __future__ import annotations
@@ -23,36 +24,53 @@ import soundfile as sf
 import librosa
 import cma
 
-from .render import SidParams, render_pyresid
+from .render import (
+    SidParams,
+    render_pyresid,
+    compute_gate_release,
+    ATTACK_MS,
+    DECAY_RELEASE_MS,
+)
 from .features import FeatureVec, extract, CANONICAL_SR
 from .fitness import distance
 
 
 # ---------------------------------------------------------------------------
-# Decision-vector layout
+# Decision-vector layout (13 continuous dimensions)
 # ---------------------------------------------------------------------------
 #
-# x[0]  attack          0..15
-# x[1]  decay           0..15
-# x[2]  sustain         0..15
-# x[3]  release         0..15
-# x[4]  pulse_width     0..4095
-# x[5]  filter_cutoff   0..2047
-# x[6]  filter_resonance 0..15
-# x[7..10] pw_table values at 4 evenly-spaced frames (0..4095)
+# x[0]  attack              0..15
+# x[1]  decay               0..15
+# x[2]  sustain             0..15
+# x[3]  release             0..15
+# x[4]  pw_start            0..4095
+# x[5]  pw_delta            -50..+50
+# x[6]  pw_min              0..4095
+# x[7]  pw_max              0..4095
+# x[8]  filter_cutoff_start 0..2047
+# x[9]  filter_cutoff_end   0..2047
+# x[10] filter_sweep_frames 0..100
+# x[11] filter_resonance    0..15
+# x[12] wt_attack_frames    1..5
 #
-# Discrete (fixed_kwargs): waveform, filter_mode, filter_voice1, ring_mod,
-# sync, volume, gate_frames, release_frames, frequency.
+# Discrete (fixed_kwargs): wt_sustain_waveform, wt_attack_waveform,
+# filter_mode, wt_use_test_bit, volume, frequency, chip_model, pw_mode.
 # ---------------------------------------------------------------------------
-
-PW_BREAKPOINTS = 4  # number of PW-modulation breakpoints
 
 BOUNDS_LOW = np.array(
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] + [0.0] * PW_BREAKPOINTS,
+    [0.0, 0.0, 0.0, 0.0,     # ADSR
+     0.0, -50.0, 0.0, 0.0,   # PW sweep
+     0.0, 0.0, 0.0,          # filter sweep start/end/frames
+     0.0,                     # filter resonance
+     1.0],                    # wt_attack_frames
     dtype=np.float64,
 )
 BOUNDS_HIGH = np.array(
-    [15.0, 15.0, 15.0, 15.0, 4095.0, 2047.0, 15.0] + [4095.0] * PW_BREAKPOINTS,
+    [15.0, 15.0, 15.0, 15.0,     # ADSR
+     4095.0, 50.0, 4095.0, 4095.0,  # PW sweep
+     2047.0, 2047.0, 100.0,         # filter sweep start/end/frames
+     15.0,                           # filter resonance
+     5.0],                           # wt_attack_frames
     dtype=np.float64,
 )
 N_DIMS = BOUNDS_LOW.size
@@ -62,14 +80,29 @@ _PARAM_NAMES = [
     "decay",
     "sustain",
     "release",
-    "pulse_width",
-    "filter_cutoff",
+    "pw_start",
+    "pw_delta",
+    "pw_min",
+    "pw_max",
+    "filter_cutoff_start",
+    "filter_cutoff_end",
+    "filter_sweep_frames",
     "filter_resonance",
-] + [f"pw_bp_{i}" for i in range(PW_BREAKPOINTS)]
+    "wt_attack_frames",
+]
 
 
 def _clip_int(v: float, lo: int, hi: int) -> int:
     return int(max(lo, min(hi, round(float(v)))))
+
+
+def compute_render_duration(attack: int, decay: int, sustain: int, release: int) -> Tuple[int, int]:
+    """Compute gate_frames and release_frames so full ADSR plays out.
+
+    This is a convenience wrapper around render.compute_gate_release that
+    is accessible from the optimize module.
+    """
+    return compute_gate_release(attack, decay, sustain, release)
 
 
 def encode_params(sid_params: SidParams) -> np.ndarray:
@@ -83,23 +116,15 @@ def encode_params(sid_params: SidParams) -> np.ndarray:
     x[1] = sid_params.decay
     x[2] = sid_params.sustain
     x[3] = sid_params.release
-    x[4] = sid_params.pulse_width
-    x[5] = sid_params.filter_cutoff
-    x[6] = sid_params.filter_resonance
-    # pw_table breakpoints
-    if sid_params.pw_table:
-        # Sample PW table at the 4 breakpoint positions.
-        total = max(1, sid_params.gate_frames)
-        for i in range(PW_BREAKPOINTS):
-            target_frame = int(i * (total - 1) / max(1, PW_BREAKPOINTS - 1))
-            # find closest entry
-            closest = min(
-                sid_params.pw_table,
-                key=lambda t: abs(t[0] - target_frame),
-            )
-            x[7 + i] = closest[1]
-    else:
-        x[7:7 + PW_BREAKPOINTS] = sid_params.pulse_width
+    x[4] = sid_params.effective_pw_start()
+    x[5] = sid_params.pw_delta
+    x[6] = sid_params.pw_min
+    x[7] = sid_params.pw_max
+    x[8] = sid_params.effective_filter_cutoff_start()
+    x[9] = sid_params.effective_filter_cutoff_end()
+    x[10] = sid_params.filter_sweep_frames
+    x[11] = sid_params.filter_resonance
+    x[12] = sid_params.wt_attack_frames
     return x
 
 
@@ -107,8 +132,7 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
     """Decode a decision vector plus ``fixed_kwargs`` into a SidParams.
 
     Continuous values are clipped-and-rounded to the appropriate integer
-    range. Bypasses pw_table construction when the waveform contains no
-    pulse component or when all breakpoints coincide with ``pulse_width``.
+    range. Gate and release frames are computed from ADSR timing.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
     if x.size != N_DIMS:
@@ -118,44 +142,74 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
     decay = _clip_int(x[1], 0, 15)
     sustain = _clip_int(x[2], 0, 15)
     release = _clip_int(x[3], 0, 15)
-    pulse_width = _clip_int(x[4], 0, 4095)
-    filter_cutoff = _clip_int(x[5], 0, 2047)
-    filter_resonance = _clip_int(x[6], 0, 15)
+    pw_start = _clip_int(x[4], 0, 4095)
+    pw_delta = _clip_int(x[5], -50, 50)
+    pw_min_val = _clip_int(x[6], 0, 4095)
+    pw_max_val = _clip_int(x[7], 0, 4095)
+    filter_cutoff_start = _clip_int(x[8], 0, 2047)
+    filter_cutoff_end = _clip_int(x[9], 0, 2047)
+    filter_sweep_frames = _clip_int(x[10], 0, 100)
+    filter_resonance = _clip_int(x[11], 0, 15)
+    wt_attack_frames = _clip_int(x[12], 1, 5)
+
+    # Ensure pw_min <= pw_max
+    if pw_min_val > pw_max_val:
+        pw_min_val, pw_max_val = pw_max_val, pw_min_val
 
     kwargs = dict(fixed_kwargs)
-    gate_frames = int(kwargs.get("gate_frames", 50))
 
-    # PW table: build only if waveform has pulse component and breakpoints vary.
-    waveform = kwargs.get("waveform", "saw")
-    has_pulse = "pulse" in str(waveform).lower()
+    # Compute ADSR-aware gate/release frames
+    gate_frames, release_frames = compute_render_duration(attack, decay, sustain, release)
 
-    bp_values = [_clip_int(x[7 + i], 0, 4095) for i in range(PW_BREAKPOINTS)]
-    pw_table: Optional[List[Tuple[int, int]]] = None
-    if has_pulse and PW_BREAKPOINTS >= 2 and max(bp_values) - min(bp_values) > 16:
-        # Distribute breakpoints across gate_frames.
-        pw_table = []
-        for i, v in enumerate(bp_values):
-            frame = int(i * (gate_frames - 1) / (PW_BREAKPOINTS - 1))
-            pw_table.append((frame, v))
+    # Resolve waveform aliases
+    wt_sustain_waveform = str(kwargs.get("wt_sustain_waveform", kwargs.get("waveform", "saw")))
+    wt_attack_waveform = kwargs.get("wt_attack_waveform")
+    if wt_attack_waveform == "same_as_sustain" or wt_attack_waveform is None:
+        wt_attack_waveform_str: Optional[str] = None
+    else:
+        wt_attack_waveform_str = str(wt_attack_waveform)
+
+    wt_use_test_bit = bool(kwargs.get("wt_use_test_bit", False))
+    filter_mode = str(kwargs.get("filter_mode", "off"))
+    pw_mode = str(kwargs.get("pw_mode", "sweep"))
+
+    # Determine if filter voice1 should be enabled
+    has_filter = filter_mode != "off"
 
     return SidParams(
-        waveform=str(waveform),
+        waveform=wt_sustain_waveform,
         attack=attack,
         decay=decay,
         sustain=sustain,
         release=release,
-        pulse_width=pulse_width,
-        pw_table=pw_table,
-        filter_cutoff=filter_cutoff,
+        pulse_width=pw_start,
+        pw_table=None,
+        filter_cutoff=filter_cutoff_start,
         filter_resonance=filter_resonance,
-        filter_mode=str(kwargs.get("filter_mode", "off")),
-        filter_voice1=bool(kwargs.get("filter_voice1", has_pulse or kwargs.get("filter_mode", "off") != "off")),
+        filter_mode=filter_mode,
+        filter_voice1=bool(kwargs.get("filter_voice1", has_filter)),
         ring_mod=bool(kwargs.get("ring_mod", False)),
         sync=bool(kwargs.get("sync", False)),
         frequency=float(kwargs.get("frequency", 440.0)),
-        gate_frames=int(kwargs.get("gate_frames", 50)),
-        release_frames=int(kwargs.get("release_frames", 50)),
+        gate_frames=gate_frames,
+        release_frames=release_frames,
         volume=int(kwargs.get("volume", 15)),
+        chip_model=kwargs.get("chip_model"),
+        # Wavetable sequence
+        wt_attack_frames=wt_attack_frames,
+        wt_attack_waveform=wt_attack_waveform_str,
+        wt_sustain_waveform=wt_sustain_waveform,
+        wt_use_test_bit=wt_use_test_bit,
+        # PW sweep
+        pw_start=pw_start,
+        pw_delta=pw_delta,
+        pw_min=pw_min_val,
+        pw_max=pw_max_val,
+        pw_mode=pw_mode,
+        # Filter sweep
+        filter_cutoff_start=filter_cutoff_start,
+        filter_cutoff_end=filter_cutoff_end,
+        filter_sweep_frames=filter_sweep_frames,
     )
 
 
@@ -336,9 +390,6 @@ class Optimizer:
         self.ref_frequency_hz = float(ref_frequency_hz)
         self.fixed_kwargs = dict(fixed_kwargs)
         self.fixed_kwargs.setdefault("frequency", self.ref_frequency_hz)
-        # Pick sensible defaults for envelope timing so the SID renders 2s.
-        self.fixed_kwargs.setdefault("gate_frames", 50)
-        self.fixed_kwargs.setdefault("release_frames", 50)
         self.weights = dict(weights) if weights else None
         self.budget = int(budget)
         self.patience = int(patience)
