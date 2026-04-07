@@ -90,6 +90,39 @@ WAV paths are resolved relative to the directory containing `note_map.json`.
   good coverage with 9 notes.  Closer spacing is fine but increases
   optimization time linearly.
 
+## Volume register click fix (V4)
+
+When the SID renderer starts playback, it sets the volume register ($D418)
+from 0 to 15.  On real hardware (and in accurate emulators like reSID), this
+causes a **DAC transient** -- a sharp click at sample offset 0 -- because
+the SID's audio-output DAC is directly coupled to the volume nybble.
+
+This click is a well-known C64 technique (it's how "digi" sample playback
+works), but it's unwanted in instrument renders.  Before V4, the click was
+present in every render and contaminated fitness evaluation in several ways:
+
+- **Attack detection**: the sharp transient was misidentified as part of the
+  instrument's attack, distorting the ADSR envelope feature.
+- **Spectral flatness**: the broadband click energy inflated flatness,
+  making tonal instruments appear noisier than they are.
+- **Harmonic estimation**: click energy leaked into the harmonic partial
+  magnitudes, biasing the cosine-distance calculation.
+
+### The fix
+
+`render_pyresid()` now inserts a **1-frame pre-roll** before the gate opens:
+the volume register is set to 15, the emulator is clocked for one PAL frame
+(~19656 cycles), and those samples are discarded.  By the time the gate
+opens, the DAC has settled and the output is click-free.
+
+See `tools/sidmatch/render.py` for the implementation.
+
+### Impact on optimization
+
+With the click removed, re-optimization (V3 -> V4) found different parameter
+strategies for grand piano, particularly on the 6581 where the click had
+the largest effect.  See `instruments/grand-piano/README.md` for details.
+
 ## Implementation
 
 - `tools/sidmatch/multi_note.py` -- `ReferenceSet` loader, `multi_note_fitness()`.
