@@ -234,6 +234,7 @@ subdirectory).
 | `--seed`        | 0       | RNG seed                                             |
 | `--work-dir`    | required | output directory                                    |
 | `--chip-model`  | None    | `"6581"` or `"8580"` (default: run both)             |
+| `--parallel-chips` / `--no-parallel-chips` | off | Refine both chip models concurrently (opt-in; useful on high-core-count machines) |
 
 ---
 
@@ -334,6 +335,26 @@ organized in three tiers:
   distance exceeds 2x the current best fitness, the full extraction is
   skipped.  This provides a lower-bound guarantee (skipped components are
   always >= 0) so no good candidates are lost.
+
+### Parallel top-K CMA-ES refinement
+
+Phase 2 combos can be refined concurrently via `ThreadPoolExecutor`.  When
+`--parallel-chips` is enabled, both chip-model runs share the thread pool
+and the per-combo worker budget is divided across active combos.  Both
+`grid_search()` and `grid_search_multi_note()` support this mode.
+
+**Benchmark** (budget=500, grand-piano, 8-core machine):
+
+| mode | wall-clock | CPU utilization |
+|------|-----------|-----------------|
+| sequential (default) | 15m 18s | 3.9x |
+| `--parallel-chips` | 33m 46s | higher, but contention-bound |
+
+The sequential default is faster on most machines; `--parallel-chips` is
+only beneficial when cores significantly outnumber active combos.
+
+Note: optimization uses **pyresidfp** exclusively.  VICE (`x64sc`) is only
+used for post-optimization verification tests.
 
 Together these changes yield an estimated **4--6x wall-clock speedup** with
 no quality regression in fitness scores.

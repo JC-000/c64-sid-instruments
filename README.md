@@ -157,6 +157,10 @@ actually build them:
   and produces instruments that track correctly across the keyboard.
   See `tools/sidmatch/multi_note.py` and `docs/multi-note-fitting.md`.
 
+- **Parallel top-K CMA-ES** -- Phase 2 refinement combos can run
+  concurrently via `--parallel-chips`.  See `tools/sidmatch/README.md`
+  for benchmarks and guidance on when this helps.
+
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.
 
