@@ -1,0 +1,11 @@
+{
+  "C3":  {"freq_hz": 130.81, "file": "salamander-piano-C3-v12-f.wav"},
+  "Eb3": {"freq_hz": 155.56, "file": "salamander-piano-Eb3-v12-f.wav"},
+  "Gb3": {"freq_hz": 185.00, "file": "salamander-piano-Gb3-v12-f.wav"},
+  "A3":  {"freq_hz": 220.00, "file": "salamander-piano-A3-v12-f.wav"},
+  "C4":  {"freq_hz": 261.63, "file": "salamander-piano-C4-v12-f.wav"},
+  "Eb4": {"freq_hz": 311.13, "file": "salamander-piano-Eb4-v12-f.wav"},
+  "Gb4": {"freq_hz": 369.99, "file": "salamander-piano-Gb4-v12-f.wav"},
+  "A4":  {"freq_hz": 440.00, "file": "salamander-piano-A4-v12-f.wav"},
+  "C5":  {"freq_hz": 523.25, "file": "salamander-piano-C5-v12-f.wav"}
+}

@@ -558,3 +558,256 @@ class Optimizer:
             wall_time_s=wall,
             converged=converged,
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-note worker pool
+# ---------------------------------------------------------------------------
+
+# Per-process globals for multi-note workers.
+_MN_WORKER_REF_SET_DATA: Optional[list] = None
+_MN_WORKER_FIXED_KWARGS: Optional[dict] = None
+_MN_WORKER_WEIGHTS: Optional[dict] = None
+_MN_WORKER_ALPHA: float = 0.25
+
+
+def _mn_worker_init(
+    ref_set_data: list, fixed_kwargs: dict,
+    weights: Optional[dict], alpha: float,
+) -> None:
+    global _MN_WORKER_REF_SET_DATA, _MN_WORKER_FIXED_KWARGS
+    global _MN_WORKER_WEIGHTS, _MN_WORKER_ALPHA
+    _MN_WORKER_REF_SET_DATA = ref_set_data
+    _MN_WORKER_FIXED_KWARGS = dict(fixed_kwargs)
+    _MN_WORKER_WEIGHTS = dict(weights) if weights else None
+    _MN_WORKER_ALPHA = alpha
+
+
+def _mn_worker_eval(x_list: List[float]) -> float:
+    from .multi_note import multi_note_fitness, ReferenceSet, NoteRef
+
+    assert _MN_WORKER_REF_SET_DATA is not None
+    assert _MN_WORKER_FIXED_KWARGS is not None
+
+    # Reconstruct ReferenceSet from serialized data.
+    notes = []
+    for entry in _MN_WORKER_REF_SET_DATA:
+        notes.append(NoteRef(
+            note_name=entry["note_name"],
+            freq_hz=entry["freq_hz"],
+            ref_fv=_fv_from_dict(entry["ref_fv"]),
+        ))
+    ref_set = ReferenceSet.from_features(notes)
+
+    x = np.asarray(x_list, dtype=np.float64)
+    params = decode_params(x, _MN_WORKER_FIXED_KWARGS)
+    chip_model = _MN_WORKER_FIXED_KWARGS.get("chip_model")
+    try:
+        return float(multi_note_fitness(
+            params, ref_set,
+            weights=_MN_WORKER_WEIGHTS,
+            alpha=_MN_WORKER_ALPHA,
+            chip_model=chip_model,
+        ))
+    except Exception:
+        return 1e6
+
+
+def _ref_set_to_data(ref_set) -> list:
+    """Serialize a ReferenceSet to a list of dicts for multiprocessing."""
+    return [
+        {
+            "note_name": n.note_name,
+            "freq_hz": n.freq_hz,
+            "ref_fv": _fv_to_dict(n.ref_fv),
+        }
+        for n in ref_set.notes
+    ]
+
+
+# ---------------------------------------------------------------------------
+# MultiNoteOptimizer
+# ---------------------------------------------------------------------------
+
+
+class MultiNoteOptimizer:
+    """CMA-ES optimizer that evaluates patches against multiple reference notes.
+
+    Like :class:`Optimizer` but uses a :class:`~sidmatch.multi_note.ReferenceSet`
+    instead of a single reference WAV. The 13-dim decision vector is
+    identical; frequency is **not** optimized but iterated over per-note
+    inside the fitness function.
+    """
+
+    def __init__(
+        self,
+        ref_set,
+        fixed_kwargs: Mapping,
+        weights: Optional[Mapping[str, float]] = None,
+        alpha: float = 0.25,
+        budget: int = 5000,
+        patience: int = 500,
+        n_workers: Optional[int] = None,
+        seed: int = 0,
+        work_dir: Optional[Path] = None,
+        log_interval: int = 100,
+    ) -> None:
+        self.ref_set = ref_set
+        self.fixed_kwargs = dict(fixed_kwargs)
+        self.weights = dict(weights) if weights else None
+        self.alpha = float(alpha)
+        self.budget = int(budget)
+        self.patience = int(patience)
+        self.n_workers = int(n_workers) if n_workers is not None else (os.cpu_count() or 1)
+        self.seed = int(seed)
+        self.work_dir = Path(work_dir) if work_dir is not None else None
+        self.log_interval = int(log_interval)
+
+    def _checkpoint_path(self) -> Optional[Path]:
+        if self.work_dir is None:
+            return None
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        return self.work_dir / "optim_state.json"
+
+    def _save_checkpoint(
+        self,
+        best_x: np.ndarray,
+        best_fitness: float,
+        history: List[float],
+        evaluations: int,
+    ) -> None:
+        path = self._checkpoint_path()
+        if path is None:
+            return
+        best_params = decode_params(best_x, self.fixed_kwargs)
+        state = {
+            "best_x": np.asarray(best_x).tolist(),
+            "best_fitness": float(best_fitness),
+            "best_params": sid_params_to_dict(best_params),
+            "history": list(map(float, history)),
+            "evaluations": int(evaluations),
+            "fixed_kwargs": self.fixed_kwargs,
+            "seed": self.seed,
+            "budget": self.budget,
+            "patience": self.patience,
+            "param_names": _PARAM_NAMES,
+            "reference_notes": [
+                {"note": n.note_name, "freq_hz": n.freq_hz}
+                for n in self.ref_set.notes
+            ],
+            "alpha": self.alpha,
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        os.replace(tmp, path)
+
+    def run(self) -> OptimizerResult:
+        from .multi_note import multi_note_fitness
+
+        t0 = time.time()
+        x0 = 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
+        mean_range = float((BOUNDS_HIGH - BOUNDS_LOW).mean())
+        sigma0 = mean_range / 6.0
+
+        cma_opts = {
+            "bounds": [BOUNDS_LOW.tolist(), BOUNDS_HIGH.tolist()],
+            "seed": self.seed if self.seed != 0 else 1,
+            "verbose": -9,
+            "maxfevals": self.budget,
+            "CMA_stds": (BOUNDS_HIGH - BOUNDS_LOW).tolist(),
+        }
+        es = cma.CMAEvolutionStrategy(x0.tolist(), sigma0, cma_opts)
+
+        history: List[float] = []
+        best_fitness = float("inf")
+        best_x: np.ndarray = x0.copy()
+        evaluations = 0
+        non_improve = 0
+        converged = False
+
+        pool = None
+        if self.n_workers > 1:
+            ref_set_data = _ref_set_to_data(self.ref_set)
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=self.n_workers,
+                initializer=_mn_worker_init,
+                initargs=(ref_set_data, self.fixed_kwargs, self.weights, self.alpha),
+            )
+
+        try:
+            while evaluations < self.budget:
+                if es.stop():
+                    break
+                solutions = es.ask()
+                solutions_list = [list(s) for s in solutions]
+
+                if pool is not None:
+                    fitnesses = pool.map(_mn_worker_eval, solutions_list)
+                else:
+                    fitnesses = []
+                    chip_model = self.fixed_kwargs.get("chip_model")
+                    for s in solutions_list:
+                        x = np.asarray(s, dtype=np.float64)
+                        params = decode_params(x, self.fixed_kwargs)
+                        try:
+                            f = float(multi_note_fitness(
+                                params, self.ref_set,
+                                weights=self.weights,
+                                alpha=self.alpha,
+                                chip_model=chip_model,
+                            ))
+                        except Exception:
+                            f = 1e6
+                        fitnesses.append(f)
+
+                es.tell(solutions, fitnesses)
+
+                evaluations += len(fitnesses)
+                gen_best = float(min(fitnesses))
+                gen_best_idx = int(np.argmin(fitnesses))
+                if gen_best < best_fitness - 1e-9:
+                    best_fitness = gen_best
+                    best_x = np.asarray(solutions_list[gen_best_idx], dtype=np.float64)
+                    non_improve = 0
+                else:
+                    non_improve += len(fitnesses)
+                history.append(best_fitness)
+
+                if self.log_interval > 0 and (
+                    evaluations // self.log_interval
+                    != (evaluations - len(fitnesses)) // self.log_interval
+                ):
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-mn] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if self.work_dir is not None and (
+                    evaluations // 100
+                    != (evaluations - len(fitnesses)) // 100
+                ):
+                    self._save_checkpoint(best_x, best_fitness, history, evaluations)
+
+                if non_improve >= self.patience:
+                    converged = True
+                    break
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+
+        self._save_checkpoint(best_x, best_fitness, history, evaluations)
+
+        wall = time.time() - t0
+        best_params = decode_params(best_x, self.fixed_kwargs)
+        return OptimizerResult(
+            best_params=best_params,
+            best_fitness=best_fitness,
+            history=history,
+            evaluations=evaluations,
+            wall_time_s=wall,
+            converged=converged,
+        )

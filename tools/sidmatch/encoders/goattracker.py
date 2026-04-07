@@ -85,7 +85,11 @@ def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
     sustain waveform. Falls back to legacy wavetable if present.
 
     left  = waveform control byte ($00..$fe; top bit indicates "relative").
-    right = note/command arg ($80 = keep playing current note).
+    right = note/command arg.  $00 = no pitch change (let the tracker
+            control the note via the frequency registers).  Values $01-$5F
+            set an absolute note, $60-$7F do relative adjustment, $80+ are
+            commands.  Instruments should use $00 so the player can set
+            whatever note it wants.
     """
     rows: List[Tuple[int, int]] = []
 
@@ -93,7 +97,7 @@ def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
     wt = params.wavetable or []
     if wt and not params.wt_attack_waveform:
         for _, wf_byte in wt:
-            rows.append((_waveform_control_byte(params, wf_byte), 0x80))
+            rows.append((_waveform_control_byte(params, wf_byte), 0x00))
         return rows
 
     # New wavetable sequence
@@ -103,14 +107,14 @@ def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
 
     if params.wt_use_test_bit:
         # Frame 0: test bit (no gate, GT handles gate separately)
-        rows.append((WF_TEST & 0xFE, 0x80))
+        rows.append((WF_TEST & 0xFE, 0x00))
 
     # Attack waveform frames
     for _ in range(wt_attack_frames):
-        rows.append((_waveform_control_byte(params, attack_wf), 0x80))
+        rows.append((_waveform_control_byte(params, attack_wf), 0x00))
 
     # Sustain waveform (final entry)
-    rows.append((_waveform_control_byte(params, sustain_wf), 0x80))
+    rows.append((_waveform_control_byte(params, sustain_wf), 0x00))
 
     return rows
 
