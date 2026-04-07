@@ -557,8 +557,13 @@ def render_vice(
     Builds a tiny .prg that writes the desired SID register sequence to
     $D400-$D418 on each PAL IRQ, then boots VICE headlessly with the WAV
     sound driver to capture the audio to disk.
+
+    Uses the c64-test-harness ``render_wav`` function for VICE lifecycle
+    management instead of raw subprocess calls.
     """
-    from .vice_verify import build_prg, run_vice_record
+    from c64_test_harness import render_wav
+
+    from .vice_verify import build_prg
 
     out_wav = Path(out_wav)
     out_wav.parent.mkdir(parents=True, exist_ok=True)
@@ -573,5 +578,10 @@ def render_vice(
     note_seconds = params.total_frames() / PAL_FRAME_HZ
     seconds = boot_pad + note_seconds + 1.0
 
-    run_vice_record(prg_path, out_wav, seconds, sample_rate=sample_rate)
+    render_wav(
+        prg_path=str(prg_path),
+        out_wav=str(out_wav),
+        duration_seconds=seconds,
+        sample_rate=sample_rate,
+    )
     return out_wav
