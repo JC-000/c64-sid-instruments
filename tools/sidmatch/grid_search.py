@@ -20,8 +20,10 @@ import numpy as np
 
 from .optimize import (
     Optimizer,
+    MultiNoteOptimizer,
     OptimizerResult,
     load_reference_audio,
+    decode_params,
     _eval_single,
     N_DIMS,
 )
@@ -234,6 +236,165 @@ def grid_search(
         res = opt.run()
         print(
             f"[grid] Phase 2 [{rank+1}/{top_k}] -> fitness={res.best_fitness:.4f} "
+            f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
+            flush=True,
+        )
+        results.append(res)
+
+    results.sort(key=lambda r: r.best_fitness)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Multi-note grid search
+# ---------------------------------------------------------------------------
+
+
+def _screen_combo_multi_note(
+    combo: dict,
+    ref_set,
+    weights: Optional[dict] = None,
+    alpha: float = 0.25,
+    chip_model: Optional[str] = None,
+) -> float:
+    """Screen one combo against all reference notes with mid-range defaults."""
+    from .multi_note import multi_note_fitness
+
+    fixed = dict(combo)
+    if chip_model:
+        fixed["chip_model"] = chip_model
+
+    x = np.zeros(N_DIMS, dtype=np.float64)
+    x[0] = _SCREENING_DEFAULTS["attack"]
+    x[1] = _SCREENING_DEFAULTS["decay"]
+    x[2] = _SCREENING_DEFAULTS["sustain"]
+    x[3] = _SCREENING_DEFAULTS["release"]
+    x[4] = _SCREENING_DEFAULTS["pw_start"]
+    x[5] = _SCREENING_DEFAULTS["pw_delta"]
+    x[6] = _SCREENING_DEFAULTS["pw_min"]
+    x[7] = _SCREENING_DEFAULTS["pw_max"]
+    x[8] = _SCREENING_DEFAULTS["filter_cutoff_start"]
+    x[9] = _SCREENING_DEFAULTS["filter_cutoff_end"]
+    x[10] = _SCREENING_DEFAULTS["filter_sweep_frames"]
+    x[11] = _SCREENING_DEFAULTS["filter_resonance"]
+    x[12] = _SCREENING_DEFAULTS["wt_attack_frames"]
+
+    params = decode_params(x, fixed)
+    return multi_note_fitness(
+        params, ref_set, weights=weights, alpha=alpha, chip_model=chip_model,
+    )
+
+
+def grid_search_multi_note(
+    ref_set,
+    work_dir: Path,
+    budget: int = 5000,
+    patience: int = 500,
+    n_workers: Optional[int] = None,
+    top_k: int = 3,
+    chip_model: str = "6581",
+    seed: int = 0,
+    weights: Optional[dict] = None,
+    alpha: float = 0.25,
+) -> List[OptimizerResult]:
+    """Two-phase grid search using multi-note evaluation.
+
+    Phase 1 screens each discrete combo against all reference notes
+    (one render per note per combo).  Phase 2 runs
+    :class:`MultiNoteOptimizer` on the top *top_k* combos.
+
+    Parameters
+    ----------
+    ref_set : ReferenceSet
+        Pre-loaded reference notes with feature vectors.
+    work_dir : Path
+        Output directory for checkpoints.
+    budget : int
+        CMA-ES evaluation budget per combo in Phase 2.
+    patience, n_workers, top_k, chip_model, seed, weights :
+        Same semantics as :func:`grid_search`.
+    alpha : float
+        Aggregation parameter for multi-note fitness.
+
+    Returns
+    -------
+    list[OptimizerResult]
+        Results sorted ascending by ``best_fitness``.
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    combos = _build_combos()
+
+    # --- Phase 1: fast screening ---
+    t0 = time.time()
+
+    screen_results: List[tuple[float, int, dict]] = []
+    for i, combo in enumerate(combos):
+        fitness = _screen_combo_multi_note(
+            combo, ref_set, weights=weights, alpha=alpha,
+            chip_model=chip_model,
+        )
+        screen_results.append((fitness, i, combo))
+
+    screen_results.sort(key=lambda t: t[0])
+    screen_time = time.time() - t0
+
+    print(
+        f"[grid-mn] Phase 1: screened {len(combos)} combos "
+        f"({len(ref_set)} notes each) in {screen_time:.1f}s",
+        flush=True,
+    )
+    print("[grid-mn] Top 10 screening results:", flush=True)
+    for rank, (fit, idx, combo) in enumerate(screen_results[:10]):
+        sw = combo["wt_sustain_waveform"]
+        aw = combo["wt_attack_waveform"]
+        fm = combo["filter_mode"]
+        tb = combo["wt_use_test_bit"]
+        print(
+            f"  {rank+1:2d}. fitness={fit:.4f}  sustain={sw} attack={aw} "
+            f"filter={fm} test_bit={tb}",
+            flush=True,
+        )
+
+    # --- Phase 2: refine top K with MultiNoteOptimizer ---
+    top_combos = screen_results[:top_k]
+
+    results: List[OptimizerResult] = []
+    for rank, (screen_fit, idx, combo) in enumerate(top_combos):
+        sw = combo["wt_sustain_waveform"]
+        aw = combo["wt_attack_waveform"]
+        fm = combo["filter_mode"]
+        tb = combo["wt_use_test_bit"]
+
+        combo_label = f"{sw}_{aw}_{fm}_tb{int(tb)}"
+        combo_dir = work_dir / combo_label.replace("+", "_")
+
+        fixed = dict(combo)
+        fixed["chip_model"] = chip_model
+
+        print(
+            f"[grid-mn] Phase 2 [{rank+1}/{top_k}] refining: sustain={sw} "
+            f"attack={aw} filter={fm} test_bit={tb} "
+            f"(screen={screen_fit:.4f}, budget={budget})",
+            flush=True,
+        )
+
+        opt = MultiNoteOptimizer(
+            ref_set=ref_set,
+            fixed_kwargs=fixed,
+            weights=weights,
+            alpha=alpha,
+            budget=budget,
+            patience=patience,
+            n_workers=n_workers,
+            seed=seed,
+            work_dir=combo_dir,
+            log_interval=100,
+        )
+        res = opt.run()
+        print(
+            f"[grid-mn] Phase 2 [{rank+1}/{top_k}] -> fitness={res.best_fitness:.4f} "
             f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
             flush=True,
         )

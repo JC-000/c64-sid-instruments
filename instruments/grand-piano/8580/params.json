@@ -1,36 +1,74 @@
 {
-  "waveform": "pulse",
-  "attack": 1,
-  "decay": 6,
-  "sustain": 14,
-  "release": 10,
-  "pulse_width": 672,
+  "waveform": "saw",
+  "attack": 9,
+  "decay": 5,
+  "sustain": 15,
+  "release": 11,
+  "pulse_width": 3324,
   "pw_table": null,
-  "filter_cutoff": 63,
-  "filter_resonance": 15,
+  "filter_cutoff": 166,
+  "filter_resonance": 6,
   "filter_mode": "lp",
   "filter_voice1": true,
   "ring_mod": false,
   "sync": false,
-  "frequency": 261.63,
-  "gate_frames": 15,
-  "release_frames": 80,
+  "frequency": 440.0,
+  "gate_frames": 25,
+  "release_frames": 125,
   "wavetable": null,
   "volume": 15,
   "chip_model": "8580",
-  "source_instrument": "Salamander Grand Piano V3, C4 fortissimo (CC-BY 3.0, Alexander Holm)",
-  "wt_attack_frames": 1,
+  "source_instrument": null,
+  "wt_attack_frames": 3,
   "wt_attack_waveform": "pulse+saw",
-  "wt_sustain_waveform": "pulse",
+  "wt_sustain_waveform": "saw",
   "wt_use_test_bit": true,
-  "pw_start": 672,
-  "pw_delta": 41,
-  "pw_min": 370,
-  "pw_max": 1300,
+  "pw_start": 3324,
+  "pw_delta": -23,
+  "pw_min": 334,
+  "pw_max": 1061,
   "pw_mode": "sweep",
-  "filter_cutoff_start": 63,
-  "filter_cutoff_end": 320,
-  "filter_sweep_frames": 100,
-  "fitness_score": 0.2534,
-  "version": 3
+  "filter_cutoff_start": 166,
+  "filter_cutoff_end": 157,
+  "filter_sweep_frames": 40,
+  "reference_notes": [
+    {
+      "note": "C3",
+      "freq_hz": 130.81
+    },
+    {
+      "note": "Eb3",
+      "freq_hz": 155.56
+    },
+    {
+      "note": "Gb3",
+      "freq_hz": 185.0
+    },
+    {
+      "note": "A3",
+      "freq_hz": 220.0
+    },
+    {
+      "note": "C4",
+      "freq_hz": 261.63
+    },
+    {
+      "note": "Eb4",
+      "freq_hz": 311.13
+    },
+    {
+      "note": "Gb4",
+      "freq_hz": 369.99
+    },
+    {
+      "note": "A4",
+      "freq_hz": 440.0
+    },
+    {
+      "note": "C5",
+      "freq_hz": 523.25
+    }
+  ],
+  "fitness_score": 0.0,
+  "version": 4
 }
