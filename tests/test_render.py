@@ -13,6 +13,7 @@ Also tests new wavetable sequence, PW sweep, and filter sweep features.
 
 from __future__ import annotations
 
+import shutil
 import wave
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import pytest
 from scipy.fft import rfft, rfftfreq
 from scipy.signal import correlate
 
+from c64_test_harness import render_wav
+
 from sidmatch.render import (
     SidParams,
     render_pyresid,
@@ -28,6 +31,12 @@ from sidmatch.render import (
     compute_gate_release,
     ATTACK_MS,
     DECAY_RELEASE_MS,
+    PAL_FRAME_HZ,
+)
+from sidmatch.vice_verify import build_prg
+
+skip_no_vice = pytest.mark.skipif(
+    shutil.which("x64sc") is None, reason="x64sc not found"
 )
 
 
@@ -138,8 +147,15 @@ def pyresid_signal(patch) -> np.ndarray:
 
 @pytest.fixture(scope="module")
 def vice_signal(patch, tmp_path_factory) -> np.ndarray:
-    out = tmp_path_factory.mktemp("vice") / "patch.wav"
-    render_vice(patch, out, sample_rate=SR)
+    tmp = tmp_path_factory.mktemp("vice")
+    prg_path = tmp / "patch.prg"
+    out = tmp / "patch.wav"
+    build_prg(patch, prg_path)
+    boot_pad = 3.0
+    note_seconds = (patch.gate_frames + patch.release_frames) / PAL_FRAME_HZ
+    duration = boot_pad + note_seconds + 1.0
+    render_wav(prg_path=str(prg_path), out_wav=str(out),
+               duration_seconds=duration, sample_rate=SR)
     return _read_wav(out)
 
 
@@ -148,6 +164,7 @@ def test_pyresid_energy(pyresid_signal):
     assert rms > 1e-3, f"pyresid RMS too low: {rms}"
 
 
+@skip_no_vice
 def test_vice_energy(vice_signal):
     rms = float(np.sqrt(np.mean(vice_signal ** 2)))
     assert rms > 1e-3, f"vice RMS too low: {rms}"
@@ -158,11 +175,13 @@ def test_pyresid_fundamental(pyresid_signal):
     assert abs(f - TARGET_HZ) < 5.0, f"pyresid fundamental off: {f}"
 
 
+@skip_no_vice
 def test_vice_fundamental(vice_signal):
     f = _fundamental_hz(vice_signal)
     assert abs(f - TARGET_HZ) < 5.0, f"vice fundamental off: {f}"
 
 
+@skip_no_vice
 def test_cross_correlation(pyresid_signal, vice_signal):
     a = _trim_to_note(pyresid_signal, seconds=0.5)
     b = _trim_to_note(vice_signal, seconds=0.5)
