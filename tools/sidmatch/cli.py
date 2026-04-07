@@ -37,11 +37,13 @@ import soundfile as sf
 
 from .optimize import (
     Optimizer,
+    MultiNoteOptimizer,
     OptimizerResult,
     sid_params_to_dict,
     sid_params_from_dict,
 )
-from .grid_search import grid_search
+from .grid_search import grid_search, grid_search_multi_note
+from .multi_note import ReferenceSet
 from .render import render_pyresid, SidParams
 from .features import CANONICAL_SR
 from .encoders.raw_asm import encode_raw_asm
@@ -201,18 +203,104 @@ def _run_match_single_chip(
     return result
 
 
+def _run_match_multi_note_chip(
+    ref_set: ReferenceSet,
+    work_dir: Path,
+    args: argparse.Namespace,
+    chip_model: str,
+) -> OptimizerResult:
+    """Run the multi-note match pipeline for a single chip model."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    top_k = getattr(args, "top_k", 3)
+
+    print(
+        f"[cli] [{chip_model}] multi-note grid_search: {len(ref_set)} notes, "
+        f"fast screen + top-{top_k} refinement, budget={args.budget} "
+        f"workers={args.workers}",
+        flush=True,
+    )
+    grid_results = grid_search_multi_note(
+        ref_set=ref_set,
+        work_dir=work_dir / "grid",
+        budget=args.budget,
+        patience=args.patience,
+        n_workers=args.workers,
+        top_k=top_k,
+        chip_model=chip_model,
+        seed=args.seed,
+    )
+
+    result = grid_results[0]
+    best_combo = {
+        "wt_sustain_waveform": result.best_params.effective_sustain_waveform(),
+        "wt_attack_waveform": result.best_params.wt_attack_waveform or "same_as_sustain",
+        "filter_mode": result.best_params.filter_mode,
+        "wt_use_test_bit": result.best_params.wt_use_test_bit,
+    }
+    print(
+        f"[cli] [{chip_model}] best combo: sustain_wf={best_combo['wt_sustain_waveform']} "
+        f"attack_wf={best_combo['wt_attack_waveform']} "
+        f"filter={best_combo['filter_mode']} "
+        f"test_bit={best_combo['wt_use_test_bit']} "
+        f"fitness={result.best_fitness:.4f}",
+        flush=True,
+    )
+
+    # Write outputs.
+    params_dict = sid_params_to_dict(result.best_params)
+    params_dict["reference_notes"] = [
+        {"note": n.note_name, "freq_hz": n.freq_hz}
+        for n in ref_set.notes
+    ]
+    (work_dir / "best_params.json").write_text(
+        json.dumps(params_dict, indent=2)
+    )
+    # Render best patch at the first note's frequency.
+    audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR,
+                           chip_model=chip_model)
+    sf.write(str(work_dir / "best_render.wav"), audio, CANONICAL_SR)
+    _save_fitness_plot(result.history, work_dir / "fitness_history.png")
+
+    print(f"[cli] [{chip_model}] wrote outputs to {work_dir}/", flush=True)
+    return result
+
+
 def cmd_match(args: argparse.Namespace) -> int:
-    sample_path = Path(args.sample).resolve()
-    if not sample_path.exists():
-        print(f"sample not found: {sample_path}", file=sys.stderr)
+    reference_set_path = getattr(args, "reference_set", None)
+
+    # Validate arguments: need either --reference-set or --sample + --frequency.
+    if not reference_set_path and (not args.sample or args.frequency is None):
+        print(
+            "error: provide either --reference-set or both --sample and --frequency",
+            file=sys.stderr,
+        )
         return 2
+
+    if reference_set_path:
+        # Multi-note mode.
+        ref_set_dir = Path(reference_set_path).resolve()
+        if not ref_set_dir.is_dir():
+            print(f"reference-set directory not found: {ref_set_dir}", file=sys.stderr)
+            return 2
+        ref_set = ReferenceSet.load(ref_set_dir)
+        print(
+            f"[cli] Loaded reference set: {len(ref_set)} notes "
+            f"({', '.join(ref_set.note_names())})",
+            flush=True,
+        )
+    else:
+        ref_set = None
+        sample_path = Path(args.sample).resolve()
+        if not sample_path.exists():
+            print(f"sample not found: {sample_path}", file=sys.stderr)
+            return 2
 
     work_dir = Path(args.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine which chip models to run.
     if args.chip_model:
-        # Explicit single-chip overrides --all-chips.
         chips = [args.chip_model]
     elif args.all_chips:
         chips = list(CHIP_MODELS)
@@ -225,7 +313,11 @@ def cmd_match(args: argparse.Namespace) -> int:
             chip_work_dir = work_dir / chip
         else:
             chip_work_dir = work_dir
-        result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
+
+        if ref_set is not None:
+            result = _run_match_multi_note_chip(ref_set, chip_work_dir, args, chip)
+        else:
+            result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
         results[chip] = result
 
     # Print summary comparing chips.
@@ -570,8 +662,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     m = sub.add_parser("match", help="search SID patch space for a sample")
-    m.add_argument("--sample", required=True, help="reference WAV path")
-    m.add_argument("--frequency", type=float, required=True, help="pitch in Hz")
+    m.add_argument("--sample", required=False, default=None, help="reference WAV path (single-note mode)")
+    m.add_argument("--frequency", type=float, required=False, default=None, help="pitch in Hz (single-note mode)")
+    m.add_argument("--reference-set", default=None,
+                   help="path to directory with note_map.json + WAVs (multi-note mode)")
     m.add_argument("--name", required=True, help="instrument name")
     m.add_argument("--budget", type=int, default=5000)
     m.add_argument("--patience", type=int, default=500)

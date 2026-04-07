@@ -54,9 +54,9 @@ acoustic_guitar_adsr:
 
 acoustic_guitar_wavetable:
     !byte $40, $00 ; attack wf (frame 0)
-    !byte $40, $01 ; attack wf (frame 1)
-    !byte $40, $02 ; attack wf (frame 2)
-    !byte $40, $03 ; sustain wf (frame 3)
+    !byte $40, $00 ; attack wf (frame 1)
+    !byte $40, $00 ; attack wf (frame 2)
+    !byte $40, $00 ; sustain wf (frame 3)
     !byte $ff, $00             ; end-of-table marker
 
 acoustic_guitar_pulsetable:

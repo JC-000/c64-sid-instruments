@@ -369,9 +369,9 @@ def test_compute_gate_release_basic():
 
 
 def test_compute_gate_release_max_sustain():
-    """S=15: decay is skipped, gate = attack + 100ms margin."""
+    """S=15: gate still uses attack + decay_ms for consistent duration."""
     gate, release = compute_gate_release(0, 9, 15, 4)
-    # A=0 (2ms), S=15 -> gate_ms = 2 + 100 = 102ms -> ~5 frames + margin
+    # A=0 (2ms) + D=9 (750ms) = 752ms -> ~42 frames
     assert gate >= 10
     assert gate <= 50
 
