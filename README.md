@@ -87,9 +87,10 @@ weights are directly interpretable. The function is symmetric and
 - **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.2.
-- Delivered scores (v3 pipeline): acoustic-guitar **0.2944** (6581) /
-  **0.2867** (8580).  Grand piano scores are from multi-note chromatic
-  evaluation across C3--C5 (9 pitches); see `instruments/grand-piano/README.md`.
+- Delivered scores: acoustic-guitar **0.2944** (6581) / **0.2867** (8580)
+  (v3 pipeline).  Grand piano **0.4194** (6581) / **0.4621** (8580)
+  (v4 pipeline, multi-note chromatic evaluation across C3--C5, 9 pitches;
+  see `instruments/grand-piano/README.md`).
 
 Each instrument folder records its fitness score in both `params.json`
 (field `fitness_score`) and `raw.asm` (comment `; @meta fitness_score=...`).
