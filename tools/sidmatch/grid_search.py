@@ -12,6 +12,8 @@ The old exhaustive strategy (mini CMA-ES per combo) is preserved as
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -26,6 +28,9 @@ from .optimize import (
     decode_params,
     _eval_single,
     N_DIMS,
+    _fv_to_dict,
+    _fv_from_dict,
+    _ref_set_to_data,
 )
 from .features import FeatureVec, extract, CANONICAL_SR
 
@@ -136,6 +141,35 @@ def _screen_combo(
     return _eval_single(x, fixed, ref_fv, weights)
 
 
+def _screen_worker(args: tuple) -> tuple:
+    """Worker for parallel Phase 1 screening. Returns (fitness, index, combo)."""
+    combo, ref_fv_dict, ref_frequency_hz, weights, chip_model, idx = args
+    from .optimize import _fv_from_dict
+    ref_fv = _fv_from_dict(ref_fv_dict)
+    fitness = _screen_combo(combo, ref_fv, ref_frequency_hz, weights=weights, chip_model=chip_model)
+    return (fitness, idx, combo)
+
+
+def _screen_worker_multi_note(args: tuple) -> tuple:
+    """Worker for parallel multi-note Phase 1 screening."""
+    combo, ref_set_data, weights, alpha, chip_model, idx = args
+    from .optimize import _fv_from_dict
+    from .multi_note import ReferenceSet, NoteRef, multi_note_fitness
+
+    # Reconstruct ReferenceSet
+    notes = []
+    for entry in ref_set_data:
+        notes.append(NoteRef(
+            note_name=entry["note_name"],
+            freq_hz=entry["freq_hz"],
+            ref_fv=_fv_from_dict(entry["ref_fv"]),
+        ))
+    ref_set = ReferenceSet.from_features(notes)
+
+    fitness = _screen_combo_multi_note(combo, ref_set, weights=weights, alpha=alpha, chip_model=chip_model)
+    return (fitness, idx, combo)
+
+
 # ---------------------------------------------------------------------------
 # New fast grid_search (default)
 # ---------------------------------------------------------------------------
@@ -170,13 +204,24 @@ def grid_search(
     audio, sr = load_reference_audio(Path(ref_wav_path))
     ref_fv = extract(audio, sr)
 
-    screen_results: List[tuple[float, int, dict]] = []
-    for i, combo in enumerate(combos):
-        fitness = _screen_combo(
-            combo, ref_fv, ref_frequency_hz,
-            weights=weights, chip_model=chip_model,
-        )
-        screen_results.append((fitness, i, combo))
+    ref_fv_dict = _fv_to_dict(ref_fv)
+    n_workers_phase1 = n_workers or (os.cpu_count() or 1)
+    if n_workers_phase1 > 1 and len(combos) > 1:
+        work_items = [
+            (combo, ref_fv_dict, ref_frequency_hz, weights, chip_model, i)
+            for i, combo in enumerate(combos)
+        ]
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=min(n_workers_phase1, len(combos))) as pool:
+            screen_results = pool.map(_screen_worker, work_items)
+    else:
+        screen_results = []
+        for i, combo in enumerate(combos):
+            fitness = _screen_combo(
+                combo, ref_fv, ref_frequency_hz,
+                weights=weights, chip_model=chip_model,
+            )
+            screen_results.append((fitness, i, combo))
 
     screen_results.sort(key=lambda t: t[0])
     screen_time = time.time() - t0
@@ -200,6 +245,16 @@ def grid_search(
     # --- Phase 2: refine top K combos with full CMA-ES ---
     top_combos = screen_results[:top_k]
     per_combo_budget = budget  # full budget per combo
+
+    # Build screening x0 from Phase 1 defaults to seed CMA-ES.
+    screening_x0 = np.zeros(N_DIMS, dtype=np.float64)
+    for i, key in enumerate([
+        "attack", "decay", "sustain", "release",
+        "pw_start", "pw_delta", "pw_min", "pw_max",
+        "filter_cutoff_start", "filter_cutoff_end",
+        "filter_sweep_frames", "filter_resonance", "wt_attack_frames",
+    ]):
+        screening_x0[i] = _SCREENING_DEFAULTS[key]
 
     results: List[OptimizerResult] = []
     for rank, (screen_fit, idx, combo) in enumerate(top_combos):
@@ -232,6 +287,8 @@ def grid_search(
             seed=seed,
             work_dir=combo_dir,
             log_interval=100,
+            ref_fv=ref_fv,
+            x0=screening_x0,
         )
         res = opt.run()
         print(
@@ -329,13 +386,24 @@ def grid_search_multi_note(
     # --- Phase 1: fast screening ---
     t0 = time.time()
 
-    screen_results: List[tuple[float, int, dict]] = []
-    for i, combo in enumerate(combos):
-        fitness = _screen_combo_multi_note(
-            combo, ref_set, weights=weights, alpha=alpha,
-            chip_model=chip_model,
-        )
-        screen_results.append((fitness, i, combo))
+    ref_set_data = _ref_set_to_data(ref_set)
+    n_workers_phase1 = n_workers or (os.cpu_count() or 1)
+    if n_workers_phase1 > 1 and len(combos) > 1:
+        work_items = [
+            (combo, ref_set_data, weights, alpha, chip_model, i)
+            for i, combo in enumerate(combos)
+        ]
+        ctx = mp.get_context("fork")
+        with ctx.Pool(processes=min(n_workers_phase1, len(combos))) as pool:
+            screen_results = pool.map(_screen_worker_multi_note, work_items)
+    else:
+        screen_results = []
+        for i, combo in enumerate(combos):
+            fitness = _screen_combo_multi_note(
+                combo, ref_set, weights=weights, alpha=alpha,
+                chip_model=chip_model,
+            )
+            screen_results.append((fitness, i, combo))
 
     screen_results.sort(key=lambda t: t[0])
     screen_time = time.time() - t0
@@ -359,6 +427,16 @@ def grid_search_multi_note(
 
     # --- Phase 2: refine top K with MultiNoteOptimizer ---
     top_combos = screen_results[:top_k]
+
+    # Build screening x0 from Phase 1 defaults to seed CMA-ES.
+    screening_x0 = np.zeros(N_DIMS, dtype=np.float64)
+    for i, key in enumerate([
+        "attack", "decay", "sustain", "release",
+        "pw_start", "pw_delta", "pw_min", "pw_max",
+        "filter_cutoff_start", "filter_cutoff_end",
+        "filter_sweep_frames", "filter_resonance", "wt_attack_frames",
+    ]):
+        screening_x0[i] = _SCREENING_DEFAULTS[key]
 
     results: List[OptimizerResult] = []
     for rank, (screen_fit, idx, combo) in enumerate(top_combos):
@@ -391,6 +469,7 @@ def grid_search_multi_note(
             seed=seed,
             work_dir=combo_dir,
             log_interval=100,
+            x0=screening_x0,
         )
         res = opt.run()
         print(

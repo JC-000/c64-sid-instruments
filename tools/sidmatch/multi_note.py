@@ -212,7 +212,7 @@ def multi_note_fitness(
             if audio.shape[0] < ref_dur_samples:
                 pad = np.zeros(ref_dur_samples - audio.shape[0], dtype=audio.dtype)
                 audio = np.concatenate([audio, pad])
-            fv = extract(audio, CANONICAL_SR)
+            fv = extract(audio, CANONICAL_SR, known_f0=note_ref.freq_hz)
             d = distance(note_ref.ref_fv, fv, weights=mn_weights)
         except Exception:
             d = 1e6
