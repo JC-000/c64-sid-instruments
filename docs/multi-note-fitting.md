@@ -123,6 +123,13 @@ With the click removed, re-optimization (V3 -> V4) found different parameter
 strategies for grand piano, particularly on the 6581 where the click had
 the largest effect.  See `instruments/grand-piano/README.md` for details.
 
+## Performance
+
+The parallel top-K CMA-ES refinement (`--parallel-chips`) applies to
+multi-note mode as well: `grid_search_multi_note()` parallelizes Phase 2
+combo refinement in the same way as single-note `grid_search()`.  See
+`tools/sidmatch/README.md` for benchmarks and caveats.
+
 ## Implementation
 
 - `tools/sidmatch/multi_note.py` -- `ReferenceSet` loader, `multi_note_fitness()`.
