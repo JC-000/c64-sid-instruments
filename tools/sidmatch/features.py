@@ -143,7 +143,8 @@ def _detect_adsr(env: np.ndarray, hop_s: float) -> tuple:
 
 
 def _harmonic_magnitudes(
-    y: np.ndarray, sr: int, f0: float, n_harmonics: int = N_HARMONICS
+    y: np.ndarray, sr: int, f0: float, n_harmonics: int = N_HARMONICS,
+    S: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Average magnitudes of the first ``n_harmonics`` partials.
 
@@ -154,7 +155,8 @@ def _harmonic_magnitudes(
     if f0 <= 0.0 or not np.isfinite(f0):
         return np.zeros(n_harmonics, dtype=np.float64)
 
-    S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=_hop_length(sr)))
+    if S is None:
+        S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=_hop_length(sr)))
     if S.size == 0:
         return np.zeros(n_harmonics, dtype=np.float64)
 
@@ -218,9 +220,82 @@ def _estimate_f0(y: np.ndarray, sr: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# lightweight extraction for early rejection
+
+def extract_lite(audio: np.ndarray, sr: int, known_f0: float) -> FeatureVec:
+    """Lightweight feature extraction for early rejection.
+
+    Computes only envelope, ADSR, harmonics, and fundamental (from known_f0).
+    Spectral centroid/rolloff/flatness and noisiness are zeroed.
+    """
+    y = _to_mono(audio)
+    y = np.asarray(y, dtype=np.float32)
+    if y.size == 0:
+        raise ValueError("audio is empty")
+
+    if sr != CANONICAL_SR:
+        y = librosa.resample(y, orig_sr=sr, target_sr=CANONICAL_SR)
+    work_sr = CANONICAL_SR
+
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    if peak <= 1e-9:
+        return FeatureVec(
+            sr=work_sr,
+            duration_s=float(y.size / work_sr),
+            amplitude_envelope=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+            attack_time_s=0.0,
+            decay_time_s=0.0,
+            sustain_level=0.0,
+            release_time_s=0.0,
+            harmonic_magnitudes=np.zeros(N_HARMONICS, dtype=np.float64),
+            spectral_centroid=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+            spectral_rolloff=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+            spectral_flatness=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+            fundamental_hz=0.0,
+            noisiness=0.0,
+        )
+
+    y_trim, _ = librosa.effects.trim(y, top_db=-SILENCE_DB)
+    if y_trim.size < 256:
+        y_trim = y
+    duration_s = float(y_trim.size / work_sr)
+    hop = _hop_length(work_sr)
+
+    # Envelope
+    rms = librosa.feature.rms(y=y_trim, frame_length=N_FFT, hop_length=hop)[0]
+    rms_max = float(rms.max()) if rms.size else 0.0
+    env_norm = rms / rms_max if rms_max > 0 else rms
+    env_resampled = _resample_series(env_norm)
+
+    # ADSR (cheap: runs on the envelope, no FFT needed)
+    hop_s = hop / work_sr
+    attack_s, decay_s, sustain_level, release_s = _detect_adsr(env_norm, hop_s)
+
+    # Harmonics (single STFT)
+    S_mag = np.abs(librosa.stft(y_trim, n_fft=N_FFT, hop_length=hop))
+    harmonics = _harmonic_magnitudes(y_trim, work_sr, known_f0, S=S_mag)
+
+    return FeatureVec(
+        sr=work_sr,
+        duration_s=duration_s,
+        amplitude_envelope=env_resampled.astype(np.float64),
+        attack_time_s=attack_s,
+        decay_time_s=decay_s,
+        sustain_level=sustain_level,
+        release_time_s=release_s,
+        harmonic_magnitudes=harmonics.astype(np.float64),
+        spectral_centroid=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+        spectral_rolloff=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+        spectral_flatness=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
+        fundamental_hz=float(known_f0),
+        noisiness=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # main entrypoint
 
-def extract(audio: np.ndarray, sr: int) -> FeatureVec:
+def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> FeatureVec:
     """Extract a :class:`FeatureVec` from a raw audio buffer.
 
     Parameters
@@ -294,7 +369,7 @@ def extract(audio: np.ndarray, sr: int) -> FeatureVec:
     )[0]
 
     # Fundamental estimation.
-    f0 = _estimate_f0(y_trim, work_sr)
+    f0 = known_f0 if known_f0 is not None else _estimate_f0(y_trim, work_sr)
 
     # Harmonic magnitudes over sustain region if we have one, else whole signal.
     if env_norm.size > 4:
@@ -308,14 +383,11 @@ def extract(audio: np.ndarray, sr: int) -> FeatureVec:
         sus_start = peak_frame
         if sus_end - sus_start < 2:
             sus_start, sus_end = 0, env_norm.size - 1
-        # Convert frame indices to sample indices.
-        a = sus_start * hop
-        b = min(y_trim.size, (sus_end + 1) * hop)
-        sus_sig = y_trim[a:b] if b > a + N_FFT else y_trim
+        # Slice the already-computed STFT to the sustain frames.
+        S_sustain = S_mag[:, sus_start:sus_end + 1]
+        harmonics = _harmonic_magnitudes(y_trim, work_sr, f0, S=S_sustain)
     else:
-        sus_sig = y_trim
-
-    harmonics = _harmonic_magnitudes(sus_sig, work_sr, f0)
+        harmonics = _harmonic_magnitudes(y_trim, work_sr, f0, S=S_mag)
 
     # Noisiness: mean spectral flatness over the sustain region.
     noisiness = float(np.mean(flatness)) if flatness.size else 0.0

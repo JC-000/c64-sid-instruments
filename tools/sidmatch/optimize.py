@@ -31,8 +31,8 @@ from .render import (
     ATTACK_MS,
     DECAY_RELEASE_MS,
 )
-from .features import FeatureVec, extract, CANONICAL_SR
-from .fitness import distance
+from .features import FeatureVec, extract, extract_lite, CANONICAL_SR
+from .fitness import distance, distance_lite
 
 
 # ---------------------------------------------------------------------------
@@ -279,13 +279,20 @@ def load_reference_audio(
 _WORKER_REF_FV: Optional[FeatureVec] = None
 _WORKER_FIXED_KWARGS: Optional[dict] = None
 _WORKER_WEIGHTS: Optional[dict] = None
+_WORKER_BEST_FITNESS: Optional[mp.Value] = None
 
 
-def _worker_init(ref_fv_dict: dict, fixed_kwargs: dict, weights: Optional[dict]) -> None:
-    global _WORKER_REF_FV, _WORKER_FIXED_KWARGS, _WORKER_WEIGHTS
+def _worker_init(
+    ref_fv_dict: dict,
+    fixed_kwargs: dict,
+    weights: Optional[dict],
+    best_fitness_val: Optional[mp.Value] = None,
+) -> None:
+    global _WORKER_REF_FV, _WORKER_FIXED_KWARGS, _WORKER_WEIGHTS, _WORKER_BEST_FITNESS
     _WORKER_REF_FV = _fv_from_dict(ref_fv_dict)
     _WORKER_FIXED_KWARGS = dict(fixed_kwargs)
     _WORKER_WEIGHTS = dict(weights) if weights else None
+    _WORKER_BEST_FITNESS = best_fitness_val
 
 
 def _worker_eval(x_list: List[float]) -> float:
@@ -295,7 +302,17 @@ def _worker_eval(x_list: List[float]) -> float:
     chip_model = _WORKER_FIXED_KWARGS.get("chip_model")
     try:
         audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
-        fv = extract(audio, CANONICAL_SR)
+
+        # Early rejection: compute cheap partial fitness first.
+        if _WORKER_BEST_FITNESS is not None:
+            threshold = _WORKER_BEST_FITNESS.value
+            if threshold < 1e5:  # only apply once we have a real best
+                fv_lite = extract_lite(audio, CANONICAL_SR, known_f0=params.frequency)
+                d_lite = distance_lite(_WORKER_REF_FV, fv_lite, weights=_WORKER_WEIGHTS)
+                if d_lite > 2.0 * threshold:
+                    return d_lite  # skip full extraction
+
+        fv = extract(audio, CANONICAL_SR, known_f0=params.frequency)
         return float(distance(_WORKER_REF_FV, fv, weights=_WORKER_WEIGHTS))
     except Exception as e:
         # Penalize broken candidates heavily.
@@ -307,13 +324,22 @@ def _eval_single(
     fixed_kwargs: dict,
     ref_fv: FeatureVec,
     weights: Optional[dict],
+    best_fitness: float = float("inf"),
 ) -> float:
     """In-process evaluation (used when n_workers=1)."""
     params = decode_params(x, fixed_kwargs)
     chip_model = fixed_kwargs.get("chip_model")
     try:
         audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
-        fv = extract(audio, CANONICAL_SR)
+
+        # Early rejection: compute cheap partial fitness first.
+        if best_fitness < 1e5:
+            fv_lite = extract_lite(audio, CANONICAL_SR, known_f0=params.frequency)
+            d_lite = distance_lite(ref_fv, fv_lite, weights=weights)
+            if d_lite > 2.0 * best_fitness:
+                return d_lite  # skip full extraction
+
+        fv = extract(audio, CANONICAL_SR, known_f0=params.frequency)
         return float(distance(ref_fv, fv, weights=weights))
     except Exception:
         return 1e6
@@ -386,6 +412,8 @@ class Optimizer:
         ref_audio: Optional[np.ndarray] = None,
         ref_sr: Optional[int] = None,
         log_interval: int = 100,
+        ref_fv: Optional[FeatureVec] = None,
+        x0: Optional[np.ndarray] = None,
     ) -> None:
         self.ref_frequency_hz = float(ref_frequency_hz)
         self.fixed_kwargs = dict(fixed_kwargs)
@@ -397,16 +425,20 @@ class Optimizer:
         self.seed = int(seed)
         self.work_dir = Path(work_dir) if work_dir is not None else None
         self.log_interval = int(log_interval)
+        self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
 
         # Load reference features.
-        if ref_audio is not None and ref_sr is not None:
+        if ref_fv is not None:
+            self.ref_fv = ref_fv
+        elif ref_audio is not None and ref_sr is not None:
             audio = np.asarray(ref_audio, dtype=np.float32)
             sr = int(ref_sr)
+            self.ref_fv = extract(audio, sr)
         elif ref_wav_path is not None:
             audio, sr = load_reference_audio(Path(ref_wav_path))
+            self.ref_fv = extract(audio, sr)
         else:
-            raise ValueError("must provide either ref_wav_path or ref_audio+ref_sr")
-        self.ref_fv = extract(audio, sr)
+            raise ValueError("must provide ref_fv, ref_wav_path, or ref_audio+ref_sr")
 
     # ---------- checkpoint helpers ----------
 
@@ -458,8 +490,8 @@ class Optimizer:
 
     def run(self) -> OptimizerResult:
         t0 = time.time()
-        # Start from the mid-range point.
-        x0 = 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
+        # Start from caller-provided x0 or the mid-range point.
+        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
         # sigma0 = one quarter of the average range.
         mean_range = float((BOUNDS_HIGH - BOUNDS_LOW).mean())
         sigma0 = mean_range / 6.0
@@ -482,13 +514,15 @@ class Optimizer:
 
         # Build pool if parallel.
         pool = None
+        best_fitness_shared = None
         ref_fv_dict = _fv_to_dict(self.ref_fv)
         if self.n_workers > 1:
+            best_fitness_shared = mp.Value('d', float('inf'))
             ctx = mp.get_context("fork")
             pool = ctx.Pool(
                 processes=self.n_workers,
                 initializer=_worker_init,
-                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights),
+                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights, best_fitness_shared),
             )
 
         try:
@@ -501,7 +535,10 @@ class Optimizer:
                     fitnesses = pool.map(_worker_eval, solutions_list)
                 else:
                     fitnesses = [
-                        _eval_single(np.asarray(s), self.fixed_kwargs, self.ref_fv, self.weights)
+                        _eval_single(
+                            np.asarray(s), self.fixed_kwargs, self.ref_fv,
+                            self.weights, best_fitness=best_fitness,
+                        )
                         for s in solutions_list
                     ]
                 es.tell(solutions, fitnesses)
@@ -513,6 +550,8 @@ class Optimizer:
                     best_fitness = gen_best
                     best_x = np.asarray(solutions_list[gen_best_idx], dtype=np.float64)
                     non_improve = 0
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = best_fitness
                 else:
                     non_improve += len(fitnesses)
                 history.append(best_fitness)
@@ -569,6 +608,7 @@ _MN_WORKER_REF_SET_DATA: Optional[list] = None
 _MN_WORKER_FIXED_KWARGS: Optional[dict] = None
 _MN_WORKER_WEIGHTS: Optional[dict] = None
 _MN_WORKER_ALPHA: float = 0.25
+_MN_WORKER_REF_SET = None
 
 
 def _mn_worker_init(
@@ -576,35 +616,36 @@ def _mn_worker_init(
     weights: Optional[dict], alpha: float,
 ) -> None:
     global _MN_WORKER_REF_SET_DATA, _MN_WORKER_FIXED_KWARGS
-    global _MN_WORKER_WEIGHTS, _MN_WORKER_ALPHA
+    global _MN_WORKER_WEIGHTS, _MN_WORKER_ALPHA, _MN_WORKER_REF_SET
     _MN_WORKER_REF_SET_DATA = ref_set_data
     _MN_WORKER_FIXED_KWARGS = dict(fixed_kwargs)
     _MN_WORKER_WEIGHTS = dict(weights) if weights else None
     _MN_WORKER_ALPHA = alpha
 
-
-def _mn_worker_eval(x_list: List[float]) -> float:
-    from .multi_note import multi_note_fitness, ReferenceSet, NoteRef
-
-    assert _MN_WORKER_REF_SET_DATA is not None
-    assert _MN_WORKER_FIXED_KWARGS is not None
-
-    # Reconstruct ReferenceSet from serialized data.
+    # Build the ReferenceSet once at worker init instead of per evaluation.
+    from .multi_note import ReferenceSet, NoteRef
     notes = []
-    for entry in _MN_WORKER_REF_SET_DATA:
+    for entry in ref_set_data:
         notes.append(NoteRef(
             note_name=entry["note_name"],
             freq_hz=entry["freq_hz"],
             ref_fv=_fv_from_dict(entry["ref_fv"]),
         ))
-    ref_set = ReferenceSet.from_features(notes)
+    _MN_WORKER_REF_SET = ReferenceSet.from_features(notes)
+
+
+def _mn_worker_eval(x_list: List[float]) -> float:
+    from .multi_note import multi_note_fitness
+
+    assert _MN_WORKER_REF_SET is not None
+    assert _MN_WORKER_FIXED_KWARGS is not None
 
     x = np.asarray(x_list, dtype=np.float64)
     params = decode_params(x, _MN_WORKER_FIXED_KWARGS)
     chip_model = _MN_WORKER_FIXED_KWARGS.get("chip_model")
     try:
         return float(multi_note_fitness(
-            params, ref_set,
+            params, _MN_WORKER_REF_SET,
             weights=_MN_WORKER_WEIGHTS,
             alpha=_MN_WORKER_ALPHA,
             chip_model=chip_model,
@@ -651,6 +692,7 @@ class MultiNoteOptimizer:
         seed: int = 0,
         work_dir: Optional[Path] = None,
         log_interval: int = 100,
+        x0: Optional[np.ndarray] = None,
     ) -> None:
         self.ref_set = ref_set
         self.fixed_kwargs = dict(fixed_kwargs)
@@ -662,6 +704,7 @@ class MultiNoteOptimizer:
         self.seed = int(seed)
         self.work_dir = Path(work_dir) if work_dir is not None else None
         self.log_interval = int(log_interval)
+        self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
 
     def _checkpoint_path(self) -> Optional[Path]:
         if self.work_dir is None:
@@ -705,7 +748,8 @@ class MultiNoteOptimizer:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
-        x0 = 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
+        # Start from caller-provided x0 or the mid-range point.
+        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
         mean_range = float((BOUNDS_HIGH - BOUNDS_LOW).mean())
         sigma0 = mean_range / 6.0
 

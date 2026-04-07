@@ -36,6 +36,9 @@ WF_RING_MOD = 0x04
 WF_TEST = 0x08
 WF_GATE = 0x01
 
+# Cache for SID emulator instances, keyed by (sample_rate, chip_model_str).
+_SID_CACHE: dict = {}
+
 # ---------------------------------------------------------------------------
 # SID ADSR timing tables (hardware-defined, in milliseconds)
 # ---------------------------------------------------------------------------
@@ -353,6 +356,29 @@ def _resolve_chip_model(chip_model: Optional[str] = None):
     )
 
 
+def _get_sid(sample_rate: int, chip_model: Optional[str] = None):
+    """Get a cached SID instance, or create one. Reuses via reset()."""
+    from pyresidfp import SoundInterfaceDevice
+
+    key = (sample_rate, chip_model)
+    if key in _SID_CACHE:
+        sid = _SID_CACHE[key]
+        sid.reset()
+        return sid
+
+    model = _resolve_chip_model(chip_model)
+    kw: dict = dict(
+        sampling_frequency=sample_rate,
+        clock_frequency=PAL_CLOCK_HZ,
+    )
+    if model is not None:
+        kw["model"] = model
+    sid = SoundInterfaceDevice(**kw)
+    sid.reset()
+    _SID_CACHE[key] = sid
+    return sid
+
+
 def render_pyresid(
     params: SidParams, sample_rate: int = 44100, chip_model: Optional[str] = None,
 ) -> np.ndarray:
@@ -373,17 +399,9 @@ def render_pyresid(
     Returns a mono float32 numpy array in ``[-1, 1]``.
     """
     # Local import so that test collection works without pyresidfp.
-    from pyresidfp import SoundInterfaceDevice, WritableRegister  # type: ignore
+    from pyresidfp import WritableRegister  # type: ignore
 
-    model = _resolve_chip_model(chip_model)
-    kw: dict = dict(
-        sampling_frequency=sample_rate,
-        clock_frequency=PAL_CLOCK_HZ,
-    )
-    if model is not None:
-        kw["model"] = model
-    sid = SoundInterfaceDevice(**kw)
-    sid.reset()
+    sid = _get_sid(sample_rate, chip_model)
 
     freq_reg = hz_to_sid_freq(params.frequency, PAL_CLOCK_HZ)
 
