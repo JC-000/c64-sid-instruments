@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -307,18 +308,70 @@ def cmd_match(args: argparse.Namespace) -> int:
     else:
         chips = list(CHIP_MODELS)
 
-    results: dict[str, OptimizerResult] = {}
-    for chip in chips:
-        if len(chips) > 1:
-            chip_work_dir = work_dir / chip
-        else:
-            chip_work_dir = work_dir
+    parallel_chips = getattr(args, "parallel_chips", True) and len(chips) > 1
 
-        if ref_set is not None:
-            result = _run_match_multi_note_chip(ref_set, chip_work_dir, args, chip)
-        else:
-            result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
-        results[chip] = result
+    results: dict[str, OptimizerResult] = {}
+
+    if parallel_chips:
+        # Halve workers per chip so both don't fight over all cores.
+        original_workers = args.workers
+        cpu_count = args.workers or __import__("os").cpu_count() or 1
+        args_per_chip: dict[str, argparse.Namespace] = {}
+        for chip in chips:
+            ns = argparse.Namespace(**vars(args))
+            ns.workers = max(1, cpu_count // 2)
+            args_per_chip[chip] = ns
+
+        print(
+            f"[cli] Running {len(chips)} chip models in parallel "
+            f"({cpu_count // 2} workers each)",
+            flush=True,
+        )
+
+        # Use threads for outer parallelism; inner optimizer spawns its
+        # own multiprocessing.Pool per chip which is safe from threads.
+        with ThreadPoolExecutor(max_workers=len(chips)) as executor:
+            futures = {}
+            for chip in chips:
+                chip_work_dir = work_dir / chip
+                chip_args = args_per_chip[chip]
+                if ref_set is not None:
+                    fut = executor.submit(
+                        _run_match_multi_note_chip,
+                        ref_set, chip_work_dir, chip_args, chip,
+                    )
+                else:
+                    fut = executor.submit(
+                        _run_match_single_chip,
+                        sample_path, chip_work_dir, chip_args, chip,
+                    )
+                futures[fut] = chip
+
+            for fut in as_completed(futures):
+                chip = futures[fut]
+                try:
+                    results[chip] = fut.result()
+                except Exception as exc:
+                    print(
+                        f"[cli] [{chip}] FAILED: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        # Restore original workers value on args (defensive).
+        args.workers = original_workers
+    else:
+        for chip in chips:
+            if len(chips) > 1:
+                chip_work_dir = work_dir / chip
+            else:
+                chip_work_dir = work_dir
+
+            if ref_set is not None:
+                result = _run_match_multi_note_chip(ref_set, chip_work_dir, args, chip)
+            else:
+                result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
+            results[chip] = result
 
     # Print summary comparing chips.
     if len(results) > 1:
@@ -678,6 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run only this chip model (overrides --all-chips)")
     m.add_argument("--all-chips", default=True, action=argparse.BooleanOptionalAction,
                    help="run both 6581 and 8580 variants (default: True)")
+    m.add_argument("--parallel-chips", default=True, action=argparse.BooleanOptionalAction,
+                   help="run chip models in parallel when using both (default: True)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     m.set_defaults(func=cmd_match)
