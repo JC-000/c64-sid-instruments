@@ -308,7 +308,7 @@ def cmd_match(args: argparse.Namespace) -> int:
     else:
         chips = list(CHIP_MODELS)
 
-    parallel_chips = getattr(args, "parallel_chips", True) and len(chips) > 1
+    parallel_chips = getattr(args, "parallel_chips", False) and len(chips) > 1
 
     results: dict[str, OptimizerResult] = {}
 
@@ -731,8 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run only this chip model (overrides --all-chips)")
     m.add_argument("--all-chips", default=True, action=argparse.BooleanOptionalAction,
                    help="run both 6581 and 8580 variants (default: True)")
-    m.add_argument("--parallel-chips", default=True, action=argparse.BooleanOptionalAction,
-                   help="run chip models in parallel when using both (default: True)")
+    m.add_argument("--parallel-chips", default=False, action=argparse.BooleanOptionalAction,
+                   help="run chip models in parallel when using both (default: False)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     m.set_defaults(func=cmd_match)
