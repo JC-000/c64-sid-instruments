@@ -68,13 +68,13 @@ the reference sample and the SID render:
 | Component | Distance metric | Default weight |
 |---|---|---:|
 | `envelope` | L2 between normalized amplitude envelopes (128 frames) | 1.0 |
-| `harmonics` | Cosine distance of the first 16 partial magnitudes | 2.0 |
+| `harmonics` | Cosine distance of the first 16 partial magnitudes | 1.0 |
 | `spectral_centroid` | L1 between log-centroid time series (scaled by 4 octaves) | 0.5 |
 | `spectral_rolloff` | L1 between log-rolloff time series (scaled by 4 octaves) | 0.25 |
 | `spectral_flatness` | L1 between flatness time series | 0.25 |
 | `noisiness` | Squared error of scalar noisiness | 0.5 |
 | `fundamental` | Squared log2-ratio of f0 estimates | 2.0 |
-| `adsr` | L1 over (attack, decay, sustain, release) / 4 | 1.0 |
+| `adsr` | L1 over (attack, decay, sustain, release) / 4 | 1.5 |
 
 All components are non-negative and normalized to be O(1), so the default
 weights are directly interpretable. The function is symmetric and
@@ -87,9 +87,9 @@ weights are directly interpretable. The function is symmetric and
 - **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.2.
-- Delivered scores (v3 pipeline): grand-piano **0.2593** (6581) /
-  **0.2534** (8580), acoustic-guitar **0.2944** (6581) / **0.2867**
-  (8580).
+- Delivered scores (v3 pipeline): acoustic-guitar **0.2944** (6581) /
+  **0.2867** (8580).  Grand piano scores are from multi-note chromatic
+  evaluation across C3--C5 (9 pitches); see `instruments/grand-piano/README.md`.
 
 Each instrument folder records its fitness score in both `params.json`
 (field `fitness_score`) and `raw.asm` (comment `; @meta fitness_score=...`).
@@ -146,6 +146,15 @@ actually build them:
   continuous defaults). The top K combos (default 3, configurable via
   `--top-k`) are then refined with full CMA-ES optimization. This is
   dramatically faster than the old exhaustive mini-CMA-ES per combo.
+
+- **Multi-note chromatic evaluation** -- instead of optimizing against a
+  single reference note, the pipeline can evaluate each candidate across
+  multiple pitches.  Supply a directory of reference WAVs with a
+  `note_map.json` via `--reference-set` and the optimizer minimizes the
+  aggregated fitness: `(1 - alpha) * mean(d) + alpha * max(d)` (default
+  `alpha=0.15`).  This penalises patches that break at certain pitches
+  and produces instruments that track correctly across the keyboard.
+  See `tools/sidmatch/multi_note.py` and `docs/multi-note-fitting.md`.
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.

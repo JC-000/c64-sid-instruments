@@ -3,9 +3,11 @@
 Reference recordings for SID instrument design. Each file is an isolated single note.
 All WAVs are committed (each <5 MB).
 
-## Piano (target ~C4, 261.63 Hz)
+## Piano (C3–C5 chromatic scale, forte)
 
 Source: Salamander Grand Piano V3 (Alexander Holm), via the `sfzinstruments/SalamanderGrandPiano` GitHub mirror. Recorded at 48 kHz / 24-bit from a Yamaha C5 grand, 16 velocity layers. Licensed **CC-BY 3.0 Unported**.
+
+Chromatic scale samples (v12 = forte) span C3–C5 in minor-third intervals for multi-pitch evaluation. A `note_map.json` in `grand-piano/` maps note names to frequencies and filenames. The repo uses sharp names (D#/F# instead of Eb/Gb); output files use flat names for readability.
 
 ## Guitar (target ~E4, 329.63 Hz)
 
@@ -15,9 +17,17 @@ Source: Philharmonia Orchestra free sample library, via the `skratchdot/philharm
 
 | filename | source URL | license | original filename | pitch | dynamic | duration_s | sample_rate | channels | bit_depth |
 |---|---|---|---|---|---|---|---|---|---|
+| grand-piano/salamander-piano-C3-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/C3v12.flac | CC-BY 3.0 | C3v12.flac | C3 (130.81 Hz) | f (velocity layer 12/16) | 15.81 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-Eb3-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/D%233v12.flac | CC-BY 3.0 | D#3v12.flac | Eb3 (155.56 Hz) | f (velocity layer 12/16) | 15.85 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-Gb3-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/F%233v12.flac | CC-BY 3.0 | F#3v12.flac | Gb3 (185.00 Hz) | f (velocity layer 12/16) | 15.95 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-A3-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/A3v12.flac | CC-BY 3.0 | A3v12.flac | A3 (220.00 Hz) | f (velocity layer 12/16) | 15.32 | 48000 | 2 | 24 |
 | grand-piano/salamander-piano-C4-v6-mf.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/C4v6.flac | CC-BY 3.0 | C4v6.flac | C4 (261.63 Hz) | mf (velocity layer 6/16) | 15.92 | 48000 | 2 | 24 |
 | grand-piano/salamander-piano-C4-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/C4v12.flac | CC-BY 3.0 | C4v12.flac | C4 (261.63 Hz) | f (velocity layer 12/16) | 15.72 | 48000 | 2 | 24 |
 | grand-piano/salamander-piano-C4-v16-ff.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/C4v16.flac | CC-BY 3.0 | C4v16.flac | C4 (261.63 Hz) | ff (velocity layer 16/16) | 15.52 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-Eb4-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/D%234v12.flac | CC-BY 3.0 | D#4v12.flac | Eb4 (311.13 Hz) | f (velocity layer 12/16) | 15.56 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-Gb4-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/F%234v12.flac | CC-BY 3.0 | F#4v12.flac | Gb4 (369.99 Hz) | f (velocity layer 12/16) | 14.97 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-A4-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/A4v12.flac | CC-BY 3.0 | A4v12.flac | A4 (440.00 Hz) | f (velocity layer 12/16) | 13.74 | 48000 | 2 | 24 |
+| grand-piano/salamander-piano-C5-v12-f.wav | https://raw.githubusercontent.com/sfzinstruments/SalamanderGrandPiano/master/Samples/C5v12.flac | CC-BY 3.0 | C5v12.flac | C5 (523.25 Hz) | f (velocity layer 12/16) | 15.52 | 48000 | 2 | 24 |
 | acoustic-guitar/philharmonia-guitar-E4-forte.wav | https://raw.githubusercontent.com/skratchdot/philharmonia-samples/master/audio/guitar/guitar_E4_very-long_forte_normal.mp3 | CC-BY-SA 3.0 | guitar_E4_very-long_forte_normal.mp3 | E4 (329.63 Hz) | forte, normal | 5.17 | 44100 | 1 | 16 |
 | acoustic-guitar/philharmonia-guitar-E4-piano.wav | https://raw.githubusercontent.com/skratchdot/philharmonia-samples/master/audio/guitar/guitar_E4_very-long_piano_normal.mp3 | CC-BY-SA 3.0 | guitar_E4_very-long_piano_normal.mp3 | E4 (329.63 Hz) | piano, normal | 4.96 | 44100 | 1 | 16 |
 | acoustic-guitar/philharmonia-guitar-E4-forte-harmonics.wav | https://raw.githubusercontent.com/skratchdot/philharmonia-samples/master/audio/guitar/guitar_E4_very-long_forte_harmonics.mp3 | CC-BY-SA 3.0 | guitar_E4_very-long_forte_harmonics.mp3 | E4 (329.63 Hz) | forte, harmonics | 6.40 | 44100 | 1 | 16 |
