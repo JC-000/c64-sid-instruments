@@ -1,0 +1,12 @@
+{
+  "E2":  {"freq_hz": 82.41,  "file": "philharmonia-guitar-E2-forte.wav"},
+  "G2":  {"freq_hz": 98.00,  "file": "philharmonia-guitar-G2-forte.wav"},
+  "Bb2": {"freq_hz": 116.54, "file": "philharmonia-guitar-Bb2-forte.wav"},
+  "Db3": {"freq_hz": 138.59, "file": "philharmonia-guitar-Db3-forte.wav"},
+  "E3":  {"freq_hz": 164.81, "file": "philharmonia-guitar-E3-forte.wav"},
+  "G3":  {"freq_hz": 196.00, "file": "philharmonia-guitar-G3-forte.wav"},
+  "Bb3": {"freq_hz": 233.08, "file": "philharmonia-guitar-Bb3-forte.wav"},
+  "Db4": {"freq_hz": 277.18, "file": "philharmonia-guitar-Db4-forte.wav"},
+  "E4":  {"freq_hz": 329.63, "file": "philharmonia-guitar-E4-forte.wav"},
+  "G4":  {"freq_hz": 392.00, "file": "philharmonia-guitar-G4-forte.wav"}
+}
