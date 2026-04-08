@@ -26,6 +26,12 @@ instruments/
 ## Supported formats
 
 - **GoatTracker** — `.ins` files loadable in GoatTracker 2.x (Cadaver).
+  The encoder faithfully follows the GT2 player source: filter type bits
+  are in the correct positions (`$10`=LP, `$20`=BP, `$40`=HP), voice
+  routing is encoded in the `$D417` bitmask, and the filtertable uses the
+  correct 2-row format (set filter params + set cutoff).  Wavetable
+  sequences include end-of-sequence jump markers (loop back to sustain
+  waveform) and filtertable sequences include stop markers.
 - **SID-Wizard** — `.ins` files loadable in SID-Wizard (Hermit).
 - **Raw .asm** — Plain ACME-syntax register/wavetable/pulsetable/filtertable
   data for embedding directly in your own music routine.
@@ -163,6 +169,17 @@ actually build them:
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.
+
+## Tests
+
+```bash
+python3 -m pytest tests/
+```
+
+The test suite covers 104 tests across rendering, fitness scoring, feature
+extraction, multi-note evaluation, and encoder output. 44 of those tests
+are GoatTracker-specific, verifying correct filter parameter encoding,
+wavetable sequence generation, and round-trip parsing.
 
 ## License
 
