@@ -414,6 +414,7 @@ class Optimizer:
         log_interval: int = 100,
         ref_fv: Optional[FeatureVec] = None,
         x0: Optional[np.ndarray] = None,
+        max_attack: int = 15,
     ) -> None:
         self.ref_frequency_hz = float(ref_frequency_hz)
         self.fixed_kwargs = dict(fixed_kwargs)
@@ -425,6 +426,7 @@ class Optimizer:
         self.seed = int(seed)
         self.work_dir = Path(work_dir) if work_dir is not None else None
         self.log_interval = int(log_interval)
+        self.max_attack = int(np.clip(max_attack, 0, 15))
         self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
 
         # Load reference features.
@@ -490,18 +492,23 @@ class Optimizer:
 
     def run(self) -> OptimizerResult:
         t0 = time.time()
+        # Build local bounds with max_attack constraint.
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
         # Start from caller-provided x0 or the mid-range point.
-        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
+        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + bounds_high)
+        # Ensure x0 is within adjusted bounds.
+        x0 = np.clip(x0, BOUNDS_LOW, bounds_high)
         # sigma0 = one quarter of the average range.
-        mean_range = float((BOUNDS_HIGH - BOUNDS_LOW).mean())
+        mean_range = float((bounds_high - BOUNDS_LOW).mean())
         sigma0 = mean_range / 6.0
 
         cma_opts = {
-            "bounds": [BOUNDS_LOW.tolist(), BOUNDS_HIGH.tolist()],
+            "bounds": [BOUNDS_LOW.tolist(), bounds_high.tolist()],
             "seed": self.seed if self.seed != 0 else 1,
             "verbose": -9,
             "maxfevals": self.budget,
-            "CMA_stds": (BOUNDS_HIGH - BOUNDS_LOW).tolist(),
+            "CMA_stds": (bounds_high - BOUNDS_LOW).tolist(),
         }
         es = cma.CMAEvolutionStrategy(x0.tolist(), sigma0, cma_opts)
 
@@ -693,6 +700,7 @@ class MultiNoteOptimizer:
         work_dir: Optional[Path] = None,
         log_interval: int = 100,
         x0: Optional[np.ndarray] = None,
+        max_attack: int = 15,
     ) -> None:
         self.ref_set = ref_set
         self.fixed_kwargs = dict(fixed_kwargs)
@@ -704,6 +712,7 @@ class MultiNoteOptimizer:
         self.seed = int(seed)
         self.work_dir = Path(work_dir) if work_dir is not None else None
         self.log_interval = int(log_interval)
+        self.max_attack = int(np.clip(max_attack, 0, 15))
         self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
 
     def _checkpoint_path(self) -> Optional[Path]:
@@ -748,17 +757,22 @@ class MultiNoteOptimizer:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
+        # Build local bounds with max_attack constraint.
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
         # Start from caller-provided x0 or the mid-range point.
-        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
-        mean_range = float((BOUNDS_HIGH - BOUNDS_LOW).mean())
+        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + bounds_high)
+        # Ensure x0 is within adjusted bounds.
+        x0 = np.clip(x0, BOUNDS_LOW, bounds_high)
+        mean_range = float((bounds_high - BOUNDS_LOW).mean())
         sigma0 = mean_range / 6.0
 
         cma_opts = {
-            "bounds": [BOUNDS_LOW.tolist(), BOUNDS_HIGH.tolist()],
+            "bounds": [BOUNDS_LOW.tolist(), bounds_high.tolist()],
             "seed": self.seed if self.seed != 0 else 1,
             "verbose": -9,
             "maxfevals": self.budget,
-            "CMA_stds": (BOUNDS_HIGH - BOUNDS_LOW).tolist(),
+            "CMA_stds": (bounds_high - BOUNDS_LOW).tolist(),
         }
         es = cma.CMAEvolutionStrategy(x0.tolist(), sigma0, cma_opts)
 

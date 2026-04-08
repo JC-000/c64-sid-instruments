@@ -149,6 +149,7 @@ def _run_match_single_chip(
         top_k=top_k,
         chip_model=chip_model,
         seed=args.seed,
+        max_attack=args.max_attack,
     )
 
     result = grid_results[0]
@@ -230,6 +231,7 @@ def _run_match_multi_note_chip(
         top_k=top_k,
         chip_model=chip_model,
         seed=args.seed,
+        max_attack=args.max_attack,
     )
 
     result = grid_results[0]
@@ -733,6 +735,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run both 6581 and 8580 variants (default: True)")
     m.add_argument("--parallel-chips", default=False, action=argparse.BooleanOptionalAction,
                    help="run chip models in parallel when using both (default: False)")
+    m.add_argument("--max-attack", type=int, default=15,
+                   help="maximum ADSR attack value (0-15, default: 15)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     m.set_defaults(func=cmd_match)
