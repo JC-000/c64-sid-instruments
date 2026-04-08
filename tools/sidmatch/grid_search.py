@@ -188,6 +188,7 @@ def grid_search(
     seed: int = 0,
     weights: Optional[dict] = None,
     parallel: bool = True,
+    max_attack: int = 15,
 ) -> List[OptimizerResult]:
     """Fast two-phase grid search: screen all combos, then refine top K.
 
@@ -307,6 +308,7 @@ def grid_search(
             log_interval=100,
             ref_fv=ref_fv,
             x0=screening_x0,
+            max_attack=max_attack,
         )
         res = opt.run()
         print(
@@ -403,6 +405,7 @@ def grid_search_multi_note(
     weights: Optional[dict] = None,
     alpha: float = 0.25,
     parallel: bool = True,
+    max_attack: int = 15,
 ) -> List[OptimizerResult]:
     """Two-phase grid search using multi-note evaluation.
 
@@ -531,6 +534,7 @@ def grid_search_multi_note(
             work_dir=combo_dir,
             log_interval=100,
             x0=screening_x0,
+            max_attack=max_attack,
         )
         res = opt.run()
         print(
