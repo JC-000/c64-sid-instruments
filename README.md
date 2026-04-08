@@ -27,7 +27,7 @@ instruments/
 
 | Instrument | 6581 | 8580 | Notes |
 |---|---|---|---|
-| [Grand Piano](instruments/grand-piano/) | v9 | v10 | Multi-note chromatic evaluation (C3--C5, 9 pitches) |
+| [Grand Piano](instruments/grand-piano/) | v12 | v13 | Multi-note chromatic evaluation (C3--C5, 9 pitches), three-phase TPE |
 | [Acoustic Guitar](instruments/acoustic-guitar/) | v5 | v6 | |
 | [Violin](instruments/violin/) | v1 | v1 | Multi-note evaluation (G3--G5, 9 pitches) |
 
@@ -91,7 +91,7 @@ interpretable. The function is symmetric and `distance(x, x) == 0`.
 - **Typical range for SID instruments: 0.4 -- 1.0.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
   usually land above 0.4.
-- Delivered scores (v5 pipeline, CMA-ES): grand piano **0.4721** (8580),
+- Delivered scores: grand piano **0.4310** (6581) / **0.4884** (8580),
   acoustic guitar **0.5504** (8580), violin **0.9138** (6581).
 
 Each instrument folder records its fitness score in both `params.json`
