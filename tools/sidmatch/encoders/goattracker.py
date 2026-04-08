@@ -98,6 +98,10 @@ def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
     if wt and not params.wt_attack_waveform:
         for _, wf_byte in wt:
             rows.append((_waveform_control_byte(params, wf_byte), 0x00))
+        # Jump to last entry (loop on final waveform).  Row indices in an
+        # .ins file are 1-based; GT relocates them on import.
+        sustain_idx = len(rows)  # 1-based index of the last waveform row
+        rows.append((0xFF, sustain_idx))
         return rows
 
     # New wavetable sequence
@@ -115,6 +119,11 @@ def _build_wavetable_rows(params: SidParams) -> List[Tuple[int, int]]:
 
     # Sustain waveform (final entry)
     rows.append((_waveform_control_byte(params, sustain_wf), 0x00))
+
+    # Loop back to sustain waveform row so the player holds on it
+    # rather than advancing past the end of this instrument's table.
+    sustain_idx = len(rows)  # 1-based index of sustain row
+    rows.append((0xFF, sustain_idx))
 
     return rows
 
@@ -161,31 +170,63 @@ def _build_pulsetable_rows(params: SidParams) -> List[Tuple[int, int]]:
 def _build_filtertable_rows(params: SidParams) -> List[Tuple[int, int]]:
     """Return ``(left, right)`` rows for the GT filtertable.
 
-    Absolute cutoff-set rows in GT use left = $80|res_passband,
-    right = cutoff high byte (bits 3..10 of the 11-bit cutoff).
+    GT filtertable format (from the GoatTracker 2 readme):
 
-    If filter sweep is configured, emit sweep entries.
+      Left byte   Right byte   Meaning
+      ─────────   ──────────   ───────
+      $80-$F0     res|routing  Set filter params.  Left high nibble = passband
+                               ($90=LP, $A0=BP, $C0=HP).  Right = resonance
+                               (high nibble) | channel bitmask (low nibble),
+                               written directly to SID $D417.
+      $00         cutoff_hi    Set cutoff.  Right byte = cutoff high 8 bits
+                               (bits 3-10 of the 11-bit cutoff value).
+      $01-$7F     speed        Modulation step.  Left = time in ticks,
+                               right = signed speed added to cutoff each tick.
+      $FF         pos          Jump.  Right = destination ($00 = stop).
+
+    If "Set filter params" is followed by "Set cutoff" ($00 left byte) on the
+    next row, both execute on the same frame.
+
+    The player unpacks the left byte with ASL, which shifts the passband
+    nibble into $D418 bits 4-6 (LP=bit4, BP=bit5, HP=bit6).  The right byte
+    is stored directly into $D417 (bits 4-7 = resonance, bits 0-2 = voice
+    1/2/3 routing).
     """
     rows: List[Tuple[int, int]] = []
-    # mode/passband nibble:
-    mode_map = {"off": 0x00, "lp": 0x01, "bp": 0x02, "hp": 0x04}
+
+    # Passband encoding: high nibble of the left byte (before $80 OR).
+    # After ASL in the player, $10 -> bit4 (LP), $20 -> bit5 (BP),
+    # $40 -> bit6 (HP).  These match SID $D418 filter-type bits.
+    mode_map = {"off": 0x00, "lp": 0x10, "bp": 0x20, "hp": 0x40}
     passband = mode_map.get((params.filter_mode or "off").lower(), 0x00)
-    res_pb = ((params.filter_resonance & 0x0F) << 4) | passband
+
+    # Right byte of the "set filter" row: resonance (high nibble) |
+    # voice routing bitmask (low nibble), matching SID $D417 layout.
+    voice_routing = 0x01 if params.filter_voice1 else 0x00
+    res_ctrl = ((params.filter_resonance & 0x0F) << 4) | voice_routing
 
     cutoff_start = params.effective_filter_cutoff_start()
     cutoff_end = params.effective_filter_cutoff_end()
     sweep_frames = params.filter_sweep_frames
 
     cutoff_hi = (cutoff_start >> 3) & 0xFF
-    # Top bit of left byte marks "set cutoff" absolute-command in GT:
-    rows.append((0x80 | res_pb, cutoff_hi))
+
+    # Row 1: set filter parameters (passband + resonance/routing)
+    rows.append((0x80 | passband, res_ctrl))
+    # Row 2: set cutoff (executed on the same frame when immediately after
+    # a "set filter" row)
+    rows.append((0x00, cutoff_hi))
 
     if sweep_frames > 0 and cutoff_start != cutoff_end:
-        # Emit a speed entry for the sweep direction
+        # Modulation step: left = time in ticks, right = speed (signed)
         delta = (cutoff_end - cutoff_start) / max(1, sweep_frames)
         speed = max(-128, min(127, int(round(delta))))
         if speed != 0:
-            rows.append((speed & 0xFF, 0x00))
+            rows.append((sweep_frames & 0x7F, speed & 0xFF))
+
+    # Stop filter execution so the player doesn't advance past this
+    # instrument's table entries.
+    rows.append((0xFF, 0x00))
 
     return rows
 
