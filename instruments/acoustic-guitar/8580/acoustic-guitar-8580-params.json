@@ -1,0 +1,78 @@
+{
+  "waveform": "saw",
+  "attack": 8,
+  "decay": 3,
+  "sustain": 15,
+  "release": 12,
+  "pulse_width": 2245,
+  "pw_table": null,
+  "filter_cutoff": 187,
+  "filter_resonance": 0,
+  "filter_mode": "lp",
+  "filter_voice1": true,
+  "ring_mod": false,
+  "sync": false,
+  "frequency": 440.0,
+  "gate_frames": 13,
+  "release_frames": 155,
+  "wavetable": null,
+  "volume": 15,
+  "chip_model": "8580",
+  "source_instrument": "Philharmonia Orchestra (CC-BY-SA 3.0)",
+  "wt_attack_frames": 5,
+  "wt_attack_waveform": "saw+triangle",
+  "wt_sustain_waveform": "saw",
+  "wt_use_test_bit": false,
+  "pw_start": 2245,
+  "pw_delta": -26,
+  "pw_min": 1662,
+  "pw_max": 3604,
+  "pw_mode": "sweep",
+  "filter_cutoff_start": 187,
+  "filter_cutoff_end": 50,
+  "filter_sweep_frames": 100,
+  "reference_notes": [
+    {
+      "note": "E2",
+      "freq_hz": 82.41
+    },
+    {
+      "note": "G2",
+      "freq_hz": 98.0
+    },
+    {
+      "note": "Bb2",
+      "freq_hz": 116.54
+    },
+    {
+      "note": "Db3",
+      "freq_hz": 138.59
+    },
+    {
+      "note": "E3",
+      "freq_hz": 164.81
+    },
+    {
+      "note": "G3",
+      "freq_hz": 196.0
+    },
+    {
+      "note": "Bb3",
+      "freq_hz": 233.08
+    },
+    {
+      "note": "Db4",
+      "freq_hz": 277.18
+    },
+    {
+      "note": "E4",
+      "freq_hz": 329.63
+    },
+    {
+      "note": "G4",
+      "freq_hz": 392.0
+    }
+  ],
+  "fitness_score": 0.0,
+  "version": 5
+}
