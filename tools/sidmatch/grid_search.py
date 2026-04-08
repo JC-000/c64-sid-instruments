@@ -13,6 +13,7 @@ The old exhaustive strategy (mini CMA-ES per combo) is preserved as
 from __future__ import annotations
 
 import logging
+import math
 import multiprocessing as mp
 import os
 import time
@@ -84,6 +85,40 @@ def _build_combos(
                         "wt_use_test_bit": tb,
                     }
                     combos.append(combo)
+
+    # Multi-step wavetable patterns (durations fixed in the combo definition).
+    # These use wavetable_steps which overrides the 2-step attack/sustain logic.
+    _MULTISTEP_PATTERNS = [
+        # noise attack into pulse sustain (pluck)
+        ("noise_1_pulse", [("noise", 1), ("pulse", 0)]),
+        # mixed attack into saw sustain
+        ("pulse_saw_2_saw", [("pulse+saw", 2), ("saw", 0)]),
+        # 3-step pluck: noise -> pulse+saw -> pulse
+        ("noise_1_pulse_saw_2_pulse", [("noise", 1), ("pulse+saw", 2), ("pulse", 0)]),
+        # soft triangle attack into saw sustain (brass)
+        ("triangle_2_saw", [("triangle", 2), ("saw", 0)]),
+        # evolving pad: triangle -> pulse -> saw
+        ("triangle_3_pulse_5_saw", [("triangle", 3), ("pulse", 5), ("saw", 0)]),
+        # 4-step: noise -> saw -> pulse+saw -> pulse
+        ("noise_1_saw_2_pulse_saw_3_pulse",
+         [("noise", 1), ("saw", 2), ("pulse+saw", 3), ("pulse", 0)]),
+    ]
+
+    for _label, steps in _MULTISTEP_PATTERNS:
+        # Determine sustain waveform from the last step (duration 0)
+        sustain_wf_name = steps[-1][0] if steps[-1][1] == 0 else steps[-1][0]
+        for fm in fms:
+            for tb in tbs:
+                combo = {
+                    "wt_sustain_waveform": sustain_wf_name,
+                    "wt_attack_waveform": steps[0][0],
+                    "filter_mode": fm,
+                    "filter_voice1": (fm != "off"),
+                    "wt_use_test_bit": tb,
+                    "wavetable_steps": list(steps),
+                }
+                combos.append(combo)
+
     return combos
 
 
@@ -173,6 +208,33 @@ def _screen_worker_multi_note(args: tuple) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Helper: extract continuous x0 vector from SidParams
+# ---------------------------------------------------------------------------
+
+def _x0_from_params(params) -> np.ndarray:
+    """Extract the 13-dim continuous decision vector from a SidParams result.
+
+    Used by successive halving to seed the next round's CMA-ES with the
+    best solution found so far.
+    """
+    x = np.zeros(N_DIMS, dtype=np.float64)
+    x[0] = getattr(params, "attack", 0)
+    x[1] = getattr(params, "decay", 0)
+    x[2] = getattr(params, "sustain", 0)
+    x[3] = getattr(params, "release", 0)
+    x[4] = getattr(params, "pw_start", getattr(params, "pulse_width", 2048))
+    x[5] = getattr(params, "pw_delta", 0)
+    x[6] = getattr(params, "pw_min", 0)
+    x[7] = getattr(params, "pw_max", 4095)
+    x[8] = getattr(params, "filter_cutoff_start", getattr(params, "filter_cutoff", 1024))
+    x[9] = getattr(params, "filter_cutoff_end", 200)
+    x[10] = getattr(params, "filter_sweep_frames", 0)
+    x[11] = getattr(params, "filter_resonance", 8)
+    x[12] = getattr(params, "wt_attack_frames", 2)
+    return x
+
+
+# ---------------------------------------------------------------------------
 # New fast grid_search (default)
 # ---------------------------------------------------------------------------
 
@@ -189,6 +251,7 @@ def grid_search(
     weights: Optional[dict] = None,
     parallel: bool = True,
     max_attack: int = 15,
+    optimizer_backend: str = "cma",
 ) -> List[OptimizerResult]:
     """Fast two-phase grid search: screen all combos, then refine top K.
 
@@ -253,9 +316,8 @@ def grid_search(
             flush=True,
         )
 
-    # --- Phase 2: refine top K combos with full CMA-ES ---
+    # --- Phase 2: refine top K combos with successive halving ---
     top_combos = screen_results[:top_k]
-    per_combo_budget = budget  # full budget per combo
 
     # Build screening x0 from Phase 1 defaults to seed CMA-ES.
     screening_x0 = np.zeros(N_DIMS, dtype=np.float64)
@@ -270,85 +332,164 @@ def grid_search(
     # Divide workers across parallel combos so total CPU stays bounded.
     total_workers = n_workers or (os.cpu_count() or 1)
     actual_top_k = len(top_combos)
-    run_parallel = parallel and actual_top_k > 1
-    if run_parallel:
-        per_combo_workers = max(1, total_workers // actual_top_k)
-    else:
-        per_combo_workers = n_workers  # preserve original value (None → auto)
 
-    def _refine_combo(rank: int, screen_fit: float, combo: dict) -> OptimizerResult:
-        sw = combo["wt_sustain_waveform"]
-        aw = combo["wt_attack_waveform"]
-        fm = combo["filter_mode"]
-        tb = combo["wt_use_test_bit"]
+    # Successive halving budget allocation.
+    total_budget = budget * actual_top_k
+    n_rounds = max(1, math.ceil(math.log2(actual_top_k)) + 1) if actual_top_k > 1 else 1
+    budget_per_round = total_budget // n_rounds
 
-        combo_label = f"{sw}_{aw}_{fm}_tb{int(tb)}"
-        combo_dir = work_dir / combo_label.replace("+", "_")
+    print(
+        f"[grid] Phase 2: successive halving — {actual_top_k} combos, "
+        f"{n_rounds} rounds, total_budget={total_budget}, "
+        f"budget_per_round={budget_per_round}",
+        flush=True,
+    )
 
-        fixed = dict(combo)
-        fixed["chip_model"] = chip_model
+    # Track survivors: list of (screen_fit, combo, x0, cumulative_result)
+    survivors = [
+        (screen_fit, combo, screening_x0.copy(), None)
+        for screen_fit, _idx, combo in top_combos
+    ]
+
+    for rnd in range(n_rounds):
+        n_alive = len(survivors)
+        if n_alive == 0:
+            break
+        round_budget_each = max(10, budget_per_round // n_alive)
+
+        run_parallel = parallel and n_alive > 1
+        if run_parallel:
+            per_combo_workers = max(1, total_workers // n_alive)
+        else:
+            per_combo_workers = n_workers
 
         print(
-            f"[grid] Phase 2 [{rank+1}/{actual_top_k}] refining: sustain={sw} "
-            f"attack={aw} filter={fm} test_bit={tb} "
-            f"(screen={screen_fit:.4f}, budget={per_combo_budget})",
+            f"[grid] Phase 2 round {rnd+1}/{n_rounds}: {n_alive} combos, "
+            f"{round_budget_each} evals each",
             flush=True,
         )
 
-        opt = Optimizer(
-            ref_wav_path=ref_wav_path,
-            ref_frequency_hz=ref_frequency_hz,
-            fixed_kwargs=fixed,
-            weights=weights,
-            budget=per_combo_budget,
-            patience=patience,
-            n_workers=per_combo_workers,
-            seed=seed,
-            work_dir=combo_dir,
-            log_interval=100,
-            ref_fv=ref_fv,
-            x0=screening_x0,
-            max_attack=max_attack,
-        )
-        res = opt.run()
-        print(
-            f"[grid] Phase 2 [{rank+1}/{actual_top_k}] -> fitness={res.best_fitness:.4f} "
-            f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
-            flush=True,
-        )
-        return res
+        def _run_round_combo(entry):
+            screen_fit, combo, x0, prev_result = entry
+            sw = combo["wt_sustain_waveform"]
+            aw = combo["wt_attack_waveform"]
+            fm = combo["filter_mode"]
+            tb = combo["wt_use_test_bit"]
 
-    results: List[OptimizerResult] = []
-    if run_parallel:
-        print(
-            f"[grid] Phase 2: running {actual_top_k} combos in parallel "
-            f"({per_combo_workers} workers each)",
-            flush=True,
-        )
-        with ThreadPoolExecutor(max_workers=actual_top_k) as executor:
-            futures = {
-                executor.submit(_refine_combo, rank, screen_fit, combo): rank
-                for rank, (screen_fit, _idx, combo) in enumerate(top_combos)
-            }
-            for future in as_completed(futures):
-                rank = futures[future]
-                try:
-                    res = future.result()
-                    results.append(res)
-                except Exception:
-                    logging.exception(
-                        "[grid] Phase 2 combo %d failed", rank + 1,
-                    )
-    else:
-        for rank, (screen_fit, idx, combo) in enumerate(top_combos):
-            try:
-                res = _refine_combo(rank, screen_fit, combo)
-                results.append(res)
-            except Exception:
-                logging.exception(
-                    "[grid] Phase 2 combo %d failed", rank + 1,
+            combo_label = f"{sw}_{aw}_{fm}_tb{int(tb)}"
+            combo_dir = work_dir / combo_label.replace("+", "_")
+
+            fixed = dict(combo)
+            fixed["chip_model"] = chip_model
+
+            opt = Optimizer(
+                ref_wav_path=ref_wav_path,
+                ref_frequency_hz=ref_frequency_hz,
+                fixed_kwargs=fixed,
+                weights=weights,
+                budget=round_budget_each,
+                patience=patience,
+                n_workers=per_combo_workers,
+                seed=seed + rnd,
+                work_dir=combo_dir,
+                log_interval=100,
+                ref_fv=ref_fv,
+                x0=x0,
+                max_attack=max_attack,
+                warm_start=True,
+                optimizer_backend=optimizer_backend,
+            )
+            res = opt.run()
+
+            # Accumulate evaluations and wall time across rounds.
+            total_evals = res.evaluations + (prev_result.evaluations if prev_result else 0)
+            total_wall = res.wall_time_s + (prev_result.wall_time_s if prev_result else 0)
+
+            # Keep the best result across rounds.
+            if prev_result and prev_result.best_fitness < res.best_fitness:
+                combined = OptimizerResult(
+                    best_params=prev_result.best_params,
+                    best_fitness=prev_result.best_fitness,
+                    history=prev_result.history + res.history,
+                    evaluations=total_evals,
+                    wall_time_s=total_wall,
+                    converged=res.converged,
+                )
+            else:
+                combined = OptimizerResult(
+                    best_params=res.best_params,
+                    best_fitness=res.best_fitness,
+                    history=(prev_result.history if prev_result else []) + res.history,
+                    evaluations=total_evals,
+                    wall_time_s=total_wall,
+                    converged=res.converged,
                 )
 
+            # Extract best x from the result params for seeding next round.
+            best_x = _x0_from_params(res.best_params)
+
+            print(
+                f"[grid]   {sw}/{aw}/{fm}/tb{int(tb)}: "
+                f"round_fitness={res.best_fitness:.4f} "
+                f"cumul_fitness={combined.best_fitness:.4f} "
+                f"evals={total_evals}",
+                flush=True,
+            )
+            return (screen_fit, combo, best_x, combined)
+
+        # Run this round's combos (parallel or sequential).
+        round_results = []
+        if run_parallel:
+            with ThreadPoolExecutor(max_workers=n_alive) as executor:
+                futures = {
+                    executor.submit(_run_round_combo, entry): i
+                    for i, entry in enumerate(survivors)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        round_results.append(future.result())
+                    except Exception:
+                        logging.exception(
+                            "[grid] Phase 2 round %d combo %d failed",
+                            rnd + 1, idx + 1,
+                        )
+        else:
+            for i, entry in enumerate(survivors):
+                try:
+                    round_results.append(_run_round_combo(entry))
+                except Exception:
+                    logging.exception(
+                        "[grid] Phase 2 round %d combo %d failed",
+                        rnd + 1, i + 1,
+                    )
+
+        # Sort by cumulative best fitness and halve.
+        round_results.sort(key=lambda e: e[3].best_fitness)
+
+        if rnd < n_rounds - 1 and len(round_results) > 1:
+            n_keep = math.ceil(len(round_results) / 2)
+            eliminated = round_results[n_keep:]
+            survivors = round_results[:n_keep]
+            print(
+                f"[grid] Phase 2 round {rnd+1}/{n_rounds}: keeping {n_keep}, "
+                f"eliminating {len(eliminated)} combos",
+                flush=True,
+            )
+            for _, combo, _, res in eliminated:
+                sw = combo["wt_sustain_waveform"]
+                aw = combo["wt_attack_waveform"]
+                fm = combo["filter_mode"]
+                print(
+                    f"[grid]   eliminated: {sw}/{aw}/{fm} "
+                    f"(fitness={res.best_fitness:.4f})",
+                    flush=True,
+                )
+        else:
+            survivors = round_results
+
+    # Collect final results from all survivors.
+    results: List[OptimizerResult] = [entry[3] for entry in survivors if entry[3] is not None]
     results.sort(key=lambda r: r.best_fitness)
     return results
 
@@ -406,6 +547,7 @@ def grid_search_multi_note(
     alpha: float = 0.25,
     parallel: bool = True,
     max_attack: int = 15,
+    optimizer_backend: str = "cma",
 ) -> List[OptimizerResult]:
     """Two-phase grid search using multi-note evaluation.
 
@@ -481,7 +623,7 @@ def grid_search_multi_note(
             flush=True,
         )
 
-    # --- Phase 2: refine top K with MultiNoteOptimizer ---
+    # --- Phase 2: refine top K with successive halving ---
     top_combos = screen_results[:top_k]
 
     # Build screening x0 from Phase 1 defaults to seed CMA-ES.
@@ -497,84 +639,163 @@ def grid_search_multi_note(
     # Divide workers across parallel combos so total CPU stays bounded.
     total_workers = n_workers or (os.cpu_count() or 1)
     actual_top_k = len(top_combos)
-    run_parallel = parallel and actual_top_k > 1
-    if run_parallel:
-        per_combo_workers = max(1, total_workers // actual_top_k)
-    else:
-        per_combo_workers = n_workers  # preserve original value (None → auto)
 
-    def _refine_combo_mn(rank: int, screen_fit: float, combo: dict) -> OptimizerResult:
-        sw = combo["wt_sustain_waveform"]
-        aw = combo["wt_attack_waveform"]
-        fm = combo["filter_mode"]
-        tb = combo["wt_use_test_bit"]
+    # Successive halving budget allocation.
+    total_budget = budget * actual_top_k
+    n_rounds = max(1, math.ceil(math.log2(actual_top_k)) + 1) if actual_top_k > 1 else 1
+    budget_per_round = total_budget // n_rounds
 
-        combo_label = f"{sw}_{aw}_{fm}_tb{int(tb)}"
-        combo_dir = work_dir / combo_label.replace("+", "_")
+    print(
+        f"[grid-mn] Phase 2: successive halving — {actual_top_k} combos, "
+        f"{n_rounds} rounds, total_budget={total_budget}, "
+        f"budget_per_round={budget_per_round}",
+        flush=True,
+    )
 
-        fixed = dict(combo)
-        fixed["chip_model"] = chip_model
+    # Track survivors: list of (screen_fit, combo, x0, cumulative_result)
+    survivors = [
+        (screen_fit, combo, screening_x0.copy(), None)
+        for screen_fit, _idx, combo in top_combos
+    ]
+
+    for rnd in range(n_rounds):
+        n_alive = len(survivors)
+        if n_alive == 0:
+            break
+        round_budget_each = max(10, budget_per_round // n_alive)
+
+        run_parallel = parallel and n_alive > 1
+        if run_parallel:
+            per_combo_workers = max(1, total_workers // n_alive)
+        else:
+            per_combo_workers = n_workers
 
         print(
-            f"[grid-mn] Phase 2 [{rank+1}/{actual_top_k}] refining: sustain={sw} "
-            f"attack={aw} filter={fm} test_bit={tb} "
-            f"(screen={screen_fit:.4f}, budget={budget})",
+            f"[grid-mn] Phase 2 round {rnd+1}/{n_rounds}: {n_alive} combos, "
+            f"{round_budget_each} evals each",
             flush=True,
         )
 
-        opt = MultiNoteOptimizer(
-            ref_set=ref_set,
-            fixed_kwargs=fixed,
-            weights=weights,
-            alpha=alpha,
-            budget=budget,
-            patience=patience,
-            n_workers=per_combo_workers,
-            seed=seed,
-            work_dir=combo_dir,
-            log_interval=100,
-            x0=screening_x0,
-            max_attack=max_attack,
-        )
-        res = opt.run()
-        print(
-            f"[grid-mn] Phase 2 [{rank+1}/{actual_top_k}] -> fitness={res.best_fitness:.4f} "
-            f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
-            flush=True,
-        )
-        return res
+        def _run_round_combo_mn(entry):
+            screen_fit, combo, x0, prev_result = entry
+            sw = combo["wt_sustain_waveform"]
+            aw = combo["wt_attack_waveform"]
+            fm = combo["filter_mode"]
+            tb = combo["wt_use_test_bit"]
 
-    results: List[OptimizerResult] = []
-    if run_parallel:
-        print(
-            f"[grid-mn] Phase 2: running {actual_top_k} combos in parallel "
-            f"({per_combo_workers} workers each)",
-            flush=True,
-        )
-        with ThreadPoolExecutor(max_workers=actual_top_k) as executor:
-            futures = {
-                executor.submit(_refine_combo_mn, rank, screen_fit, combo): rank
-                for rank, (screen_fit, _idx, combo) in enumerate(top_combos)
-            }
-            for future in as_completed(futures):
-                rank = futures[future]
-                try:
-                    res = future.result()
-                    results.append(res)
-                except Exception:
-                    logging.exception(
-                        "[grid-mn] Phase 2 combo %d failed", rank + 1,
-                    )
-    else:
-        for rank, (screen_fit, idx, combo) in enumerate(top_combos):
-            try:
-                res = _refine_combo_mn(rank, screen_fit, combo)
-                results.append(res)
-            except Exception:
-                logging.exception(
-                    "[grid-mn] Phase 2 combo %d failed", rank + 1,
+            combo_label = f"{sw}_{aw}_{fm}_tb{int(tb)}"
+            combo_dir = work_dir / combo_label.replace("+", "_")
+
+            fixed = dict(combo)
+            fixed["chip_model"] = chip_model
+
+            opt = MultiNoteOptimizer(
+                ref_set=ref_set,
+                fixed_kwargs=fixed,
+                weights=weights,
+                alpha=alpha,
+                budget=round_budget_each,
+                patience=patience,
+                n_workers=per_combo_workers,
+                seed=seed + rnd,
+                work_dir=combo_dir,
+                log_interval=100,
+                x0=x0,
+                max_attack=max_attack,
+                warm_start=True,
+                optimizer_backend=optimizer_backend,
+            )
+            res = opt.run()
+
+            # Accumulate evaluations and wall time across rounds.
+            total_evals = res.evaluations + (prev_result.evaluations if prev_result else 0)
+            total_wall = res.wall_time_s + (prev_result.wall_time_s if prev_result else 0)
+
+            # Keep the best result across rounds.
+            if prev_result and prev_result.best_fitness < res.best_fitness:
+                combined = OptimizerResult(
+                    best_params=prev_result.best_params,
+                    best_fitness=prev_result.best_fitness,
+                    history=prev_result.history + res.history,
+                    evaluations=total_evals,
+                    wall_time_s=total_wall,
+                    converged=res.converged,
+                )
+            else:
+                combined = OptimizerResult(
+                    best_params=res.best_params,
+                    best_fitness=res.best_fitness,
+                    history=(prev_result.history if prev_result else []) + res.history,
+                    evaluations=total_evals,
+                    wall_time_s=total_wall,
+                    converged=res.converged,
                 )
 
+            # Extract best x from the result params for seeding next round.
+            best_x = _x0_from_params(res.best_params)
+
+            print(
+                f"[grid-mn]   {sw}/{aw}/{fm}/tb{int(tb)}: "
+                f"round_fitness={res.best_fitness:.4f} "
+                f"cumul_fitness={combined.best_fitness:.4f} "
+                f"evals={total_evals}",
+                flush=True,
+            )
+            return (screen_fit, combo, best_x, combined)
+
+        # Run this round's combos (parallel or sequential).
+        round_results = []
+        if run_parallel:
+            with ThreadPoolExecutor(max_workers=n_alive) as executor:
+                futures = {
+                    executor.submit(_run_round_combo_mn, entry): i
+                    for i, entry in enumerate(survivors)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        round_results.append(future.result())
+                    except Exception:
+                        logging.exception(
+                            "[grid-mn] Phase 2 round %d combo %d failed",
+                            rnd + 1, idx + 1,
+                        )
+        else:
+            for i, entry in enumerate(survivors):
+                try:
+                    round_results.append(_run_round_combo_mn(entry))
+                except Exception:
+                    logging.exception(
+                        "[grid-mn] Phase 2 round %d combo %d failed",
+                        rnd + 1, i + 1,
+                    )
+
+        # Sort by cumulative best fitness and halve.
+        round_results.sort(key=lambda e: e[3].best_fitness)
+
+        if rnd < n_rounds - 1 and len(round_results) > 1:
+            n_keep = math.ceil(len(round_results) / 2)
+            eliminated = round_results[n_keep:]
+            survivors = round_results[:n_keep]
+            print(
+                f"[grid-mn] Phase 2 round {rnd+1}/{n_rounds}: keeping {n_keep}, "
+                f"eliminating {len(eliminated)} combos",
+                flush=True,
+            )
+            for _, combo, _, res in eliminated:
+                sw = combo["wt_sustain_waveform"]
+                aw = combo["wt_attack_waveform"]
+                fm = combo["filter_mode"]
+                print(
+                    f"[grid-mn]   eliminated: {sw}/{aw}/{fm} "
+                    f"(fitness={res.best_fitness:.4f})",
+                    flush=True,
+                )
+        else:
+            survivors = round_results
+
+    # Collect final results from all survivors.
+    results: List[OptimizerResult] = [entry[3] for entry in survivors if entry[3] is not None]
     results.sort(key=lambda r: r.best_fitness)
     return results
 

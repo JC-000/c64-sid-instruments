@@ -8,58 +8,58 @@ A SID chip instrument patch: acoustic-guitar.
 |---|---|---|
 | **Status** | available | available |
 | **Fitness** | 0.0000 | 0.0000 |
-| **Version** | 4 | 5 |
+| **Version** | 5 | 6 |
 
 ### 6581 Parameters
 
 | Parameter | Value |
 |---|---|
 | waveform | saw |
-| attack | 3 |
-| decay | 8 |
-| sustain | 12 |
-| release | 12 |
-| pulse_width | 3211 |
-| pw_start | 3211 |
-| pw_delta | 38 |
+| attack | 0 |
+| decay | 3 |
+| sustain | 2 |
+| release | 14 |
+| pulse_width | 3605 |
+| pw_start | 3605 |
+| pw_delta | -35 |
 | pw_mode | sweep |
-| filter_cutoff | 1010 |
-| filter_cutoff_start | 1010 |
-| filter_cutoff_end | 300 |
-| filter_sweep_frames | 8 |
-| filter_resonance | 4 |
-| filter_mode | lp |
-| filter_voice1 | True |
-| wt_attack_waveform | saw+triangle |
+| filter_cutoff | 44 |
+| filter_cutoff_start | 44 |
+| filter_cutoff_end | 44 |
+| filter_sweep_frames | 50 |
+| filter_resonance | 8 |
+| filter_mode | off |
+| filter_voice1 | False |
+| wt_attack_waveform | pulse+saw |
 | wt_sustain_waveform | saw |
-| wt_attack_frames | 5 |
-| wt_use_test_bit | True |
+| wt_attack_frames | 3 |
+| wt_use_test_bit | False |
 | volume | 15 |
 
 ### 8580 Parameters
 
 | Parameter | Value |
 |---|---|
-| waveform | saw |
+| waveform | pulse |
 | attack | 8 |
-| decay | 3 |
-| sustain | 15 |
-| release | 12 |
-| pulse_width | 2245 |
-| pw_start | 2245 |
-| pw_delta | -26 |
+| decay | 1 |
+| sustain | 7 |
+| release | 13 |
+| pulse_width | 3481 |
+| pw_start | 3481 |
+| pw_delta | 43 |
 | pw_mode | sweep |
-| filter_cutoff | 187 |
-| filter_cutoff_start | 187 |
-| filter_cutoff_end | 50 |
-| filter_sweep_frames | 100 |
-| filter_resonance | 0 |
+| filter_cutoff | 65 |
+| filter_cutoff_start | 65 |
+| filter_cutoff_end | 67 |
+| filter_sweep_frames | 30 |
+| filter_resonance | 9 |
 | filter_mode | lp |
 | filter_voice1 | True |
-| wt_attack_waveform | saw+triangle |
-| wt_sustain_waveform | saw |
-| wt_attack_frames | 5 |
-| wt_use_test_bit | False |
+| wt_attack_waveform | noise |
+| wt_sustain_waveform | pulse |
+| wt_attack_frames | 3 |
+| wt_use_test_bit | True |
 | volume | 15 |
 
 ## Tags

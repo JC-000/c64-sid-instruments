@@ -215,6 +215,13 @@ class SidParams:
     pw_max: int = 4095
     pw_mode: str = "sweep"
 
+    # -- Multi-step wavetable --
+    # List of (waveform_str, duration_frames) tuples.
+    # If set, overrides wt_attack_waveform/wt_attack_frames/wt_sustain_waveform.
+    # Duration 0 means sustain (play until gate off).  The last entry should
+    # have duration 0.
+    wavetable_steps: Optional[List[Tuple[str, int]]] = None
+
     # -- Filter sweep --
     filter_cutoff_start: Optional[int] = None
     filter_cutoff_end: Optional[int] = None
@@ -380,7 +387,7 @@ def _get_sid(sample_rate: int, chip_model: Optional[str] = None):
 
 
 def render_pyresid(
-    params: SidParams, sample_rate: int = 44100, chip_model: Optional[str] = None,
+    params: SidParams, sample_rate: int = 22050, chip_model: Optional[str] = None,
 ) -> np.ndarray:
     """Render ``params`` with pyresidfp.
 
@@ -420,6 +427,29 @@ def render_pyresid(
     sustain_wf = _waveform_mask(params.effective_sustain_waveform())
     attack_wf = _waveform_mask(params.effective_attack_waveform())
     wt_attack_frames = max(1, params.wt_attack_frames)
+
+    # Multi-step wavetable: pre-compute frame boundaries and waveform masks
+    use_multistep = params.wavetable_steps is not None and len(params.wavetable_steps) > 0
+    multistep_boundaries: List[Tuple[int, int]] = []  # (end_frame_exclusive, wf_mask)
+    multistep_sustain_wf = sustain_wf
+    if use_multistep:
+        frame_cursor = 0
+        for wf_name, dur in params.wavetable_steps:
+            wf_mask = _waveform_mask(wf_name)
+            if dur == 0:
+                # sustain step -- plays from frame_cursor onward
+                multistep_sustain_wf = wf_mask
+                multistep_boundaries.append((999999, wf_mask))
+                break
+            else:
+                frame_cursor += dur
+                multistep_boundaries.append((frame_cursor, wf_mask))
+        else:
+            # No explicit sustain step (duration 0) found; last step is sustain
+            if multistep_boundaries:
+                last_wf = multistep_boundaries[-1][1]
+                multistep_sustain_wf = last_wf
+                multistep_boundaries[-1] = (999999, last_wf)
 
     # Legacy wavetable/pw_table support
     legacy_wt = dict(params.wavetable or [])
@@ -481,6 +511,14 @@ def render_pyresid(
         if use_legacy_wt:
             return _wf_for_frame_legacy(f, gate)
 
+        if use_multistep:
+            if params.wt_use_test_bit and f == 0:
+                return WF_TEST
+            for end_frame, wf_mask in multistep_boundaries:
+                if f < end_frame:
+                    return _build_control(wf_mask, gate)
+            return _build_control(multistep_sustain_wf, gate)
+
         if params.wt_use_test_bit and f == 0:
             # Test bit: $08, no gate (resets oscillator phase)
             return WF_TEST
@@ -518,7 +556,12 @@ def render_pyresid(
         samples.extend(chunk)
 
     # --- Gate OFF phase ---
-    gate_off_wf = sustain_wf if not use_legacy_wt else _waveform_mask(params.waveform)
+    if use_multistep:
+        gate_off_wf = multistep_sustain_wf
+    elif use_legacy_wt:
+        gate_off_wf = _waveform_mask(params.waveform)
+    else:
+        gate_off_wf = sustain_wf
     gate_off_ctrl = _build_control(gate_off_wf, gate=False)
     sid.write_register(WritableRegister.Voice1_Control_Reg, gate_off_ctrl)
 
@@ -550,7 +593,7 @@ def render_pyresid(
 
 
 def render_vice(
-    params: SidParams, out_wav: Path, sample_rate: int = 44100
+    params: SidParams, out_wav: Path, sample_rate: int = 22050
 ) -> Path:
     """Render ``params`` via VICE's ``x64sc`` and write to ``out_wav``.
 

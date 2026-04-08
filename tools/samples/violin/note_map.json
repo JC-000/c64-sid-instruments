@@ -1,0 +1,38 @@
+{
+  "G3": {
+    "freq_hz": 196.0,
+    "file": "iowa-violin-G3-ff.wav"
+  },
+  "Bb3": {
+    "freq_hz": 233.08,
+    "file": "iowa-violin-Bb3-ff.wav"
+  },
+  "Db4": {
+    "freq_hz": 277.18,
+    "file": "iowa-violin-Db4-ff.wav"
+  },
+  "E4": {
+    "freq_hz": 329.63,
+    "file": "iowa-violin-E4-ff.wav"
+  },
+  "G4": {
+    "freq_hz": 392.0,
+    "file": "iowa-violin-G4-ff.wav"
+  },
+  "Bb4": {
+    "freq_hz": 466.16,
+    "file": "iowa-violin-Bb4-ff.wav"
+  },
+  "Db5": {
+    "freq_hz": 554.37,
+    "file": "iowa-violin-Db5-ff.wav"
+  },
+  "E5": {
+    "freq_hz": 659.26,
+    "file": "iowa-violin-E5-ff.wav"
+  },
+  "G5": {
+    "freq_hz": 783.99,
+    "file": "iowa-violin-G5-ff.wav"
+  }
+}

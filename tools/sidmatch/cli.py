@@ -49,6 +49,11 @@ from .render import render_pyresid, SidParams
 from .features import CANONICAL_SR
 from .encoders.raw_asm import encode_raw_asm
 
+# Sample rate for user-facing WAV output (renders, scale files).
+# The optimization inner loop uses CANONICAL_SR (22050 Hz) for speed,
+# but final output WAVs use 44100 Hz for compatibility.
+OUTPUT_SR = 44100
+
 
 def _save_fitness_plot(history, out_path: Path) -> None:
     try:
@@ -150,6 +155,7 @@ def _run_match_single_chip(
         chip_model=chip_model,
         seed=args.seed,
         max_attack=args.max_attack,
+        optimizer_backend=getattr(args, "optimizer", "cma"),
     )
 
     result = grid_results[0]
@@ -173,9 +179,9 @@ def _run_match_single_chip(
         json.dumps(sid_params_to_dict(result.best_params), indent=2)
     )
     # Render best patch.
-    audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR,
+    audio = render_pyresid(result.best_params, sample_rate=OUTPUT_SR,
                            chip_model=chip_model)
-    sf.write(str(work_dir / "best_render.wav"), audio, CANONICAL_SR)
+    sf.write(str(work_dir / "best_render.wav"), audio, OUTPUT_SR)
     # Plot.
     _save_fitness_plot(result.history, work_dir / "fitness_history.png")
 
@@ -232,6 +238,7 @@ def _run_match_multi_note_chip(
         chip_model=chip_model,
         seed=args.seed,
         max_attack=args.max_attack,
+        optimizer_backend=getattr(args, "optimizer", "cma"),
     )
 
     result = grid_results[0]
@@ -260,9 +267,9 @@ def _run_match_multi_note_chip(
         json.dumps(params_dict, indent=2)
     )
     # Render best patch at the first note's frequency.
-    audio = render_pyresid(result.best_params, sample_rate=CANONICAL_SR,
+    audio = render_pyresid(result.best_params, sample_rate=OUTPUT_SR,
                            chip_model=chip_model)
-    sf.write(str(work_dir / "best_render.wav"), audio, CANONICAL_SR)
+    sf.write(str(work_dir / "best_render.wav"), audio, OUTPUT_SR)
     _save_fitness_plot(result.history, work_dir / "fitness_history.png")
 
     print(f"[cli] [{chip_model}] wrote outputs to {work_dir}/", flush=True)
@@ -270,6 +277,18 @@ def _run_match_multi_note_chip(
 
 
 def cmd_match(args: argparse.Namespace) -> int:
+    # Validate optimizer backend early.
+    optimizer_backend = getattr(args, "optimizer", "cma")
+    if optimizer_backend == "tpe":
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            print(
+                "error: optuna is required for TPE optimizer: pip install optuna",
+                file=sys.stderr,
+            )
+            return 2
+
     reference_set_path = getattr(args, "reference_set", None)
 
     # Validate arguments: need either --reference-set or --sample + --frequency.
@@ -469,7 +488,7 @@ def _instrument_readme(
 def _render_chromatic_scale(
     params_dict: dict,
     chip_model: str,
-    sample_rate: int = 44100,
+    sample_rate: int = OUTPUT_SR,
     gap_ms: int = 200,
 ) -> np.ndarray:
     """Render the SID patch at each reference note, concatenated with gaps."""
@@ -496,7 +515,7 @@ def _render_chromatic_scale(
 
 def _render_reference_scale(
     reference_set_dir: Path,
-    sample_rate: int = 44100,
+    sample_rate: int = OUTPUT_SR,
     gap_ms: int = 200,
 ) -> Optional[np.ndarray]:
     """Concatenate reference WAV samples into a chromatic scale."""
@@ -612,7 +631,7 @@ def _export_single_chip(
         # SID scale
         scale_audio = _render_chromatic_scale(params_dict, chip_model)
         sf.write(str(inst_dir / f"{name}-{chip_model}-scale.wav"),
-                 scale_audio, 44100)
+                 scale_audio, OUTPUT_SR)
 
         # Reference scale (look for samples dir)
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -623,7 +642,7 @@ def _export_single_chip(
             inst_base = inst_dir.parent
             ref_scale_path = inst_base / f"{name}-reference-scale.wav"
             if not ref_scale_path.exists():
-                sf.write(str(ref_scale_path), ref_audio, 44100)
+                sf.write(str(ref_scale_path), ref_audio, OUTPUT_SR)
 
     print(
         f"[cli] exported {name} [{chip_model}] v{version} "
@@ -833,6 +852,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="maximum ADSR attack value (0-15, default: 15)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
+    m.add_argument("--optimizer", default="cma", choices=["cma", "tpe"],
+                   help="optimizer backend: cma (CMA-ES, default) or tpe (Optuna TPE)")
     m.set_defaults(func=cmd_match)
 
     e = sub.add_parser("export", help="export work-dir result to instruments/")
