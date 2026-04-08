@@ -33,6 +33,7 @@ from .render import (
 )
 from .features import FeatureVec, extract, extract_lite, CANONICAL_SR
 from .fitness import distance, distance_lite
+from .surrogate import FitnessSurrogate
 
 
 # ---------------------------------------------------------------------------
@@ -45,10 +46,10 @@ from .fitness import distance, distance_lite
 # x[3]  release             0..15
 # x[4]  pw_start            0..4095
 # x[5]  pw_delta            -50..+50
-# x[6]  pw_min              0..4095
-# x[7]  pw_max              0..4095
-# x[8]  filter_cutoff_start 0..2047
-# x[9]  filter_cutoff_end   0..2047
+# x[6]  pw_center           0..4095   (midpoint of PW sweep range)
+# x[7]  pw_width            0..4095   (full width of PW range)
+# x[8]  log_cutoff_start    0..11     (log2-scale filter cutoff)
+# x[9]  log_cutoff_end      0..11     (log2-scale filter cutoff)
 # x[10] filter_sweep_frames 0..100
 # x[11] filter_resonance    0..15
 # x[12] wt_attack_frames    1..5
@@ -59,16 +60,16 @@ from .fitness import distance, distance_lite
 
 BOUNDS_LOW = np.array(
     [0.0, 0.0, 0.0, 0.0,     # ADSR
-     0.0, -50.0, 0.0, 0.0,   # PW sweep
-     0.0, 0.0, 0.0,          # filter sweep start/end/frames
+     0.0, -50.0, 0.0, 0.0,   # PW sweep (pw_start, pw_delta, pw_center, pw_width)
+     0.0, 0.0, 0.0,          # filter sweep (log_cutoff_start, log_cutoff_end, frames)
      0.0,                     # filter resonance
      1.0],                    # wt_attack_frames
     dtype=np.float64,
 )
 BOUNDS_HIGH = np.array(
-    [15.0, 15.0, 15.0, 15.0,     # ADSR
-     4095.0, 50.0, 4095.0, 4095.0,  # PW sweep
-     2047.0, 2047.0, 100.0,         # filter sweep start/end/frames
+    [15.0, 15.0, 15.0, 15.0,        # ADSR
+     4095.0, 50.0, 4095.0, 4095.0,  # PW sweep (pw_start, pw_delta, pw_center, pw_width)
+     11.0, 11.0, 100.0,             # filter sweep (log_cutoff_start, log_cutoff_end, frames)
      15.0,                           # filter resonance
      5.0],                           # wt_attack_frames
     dtype=np.float64,
@@ -82,10 +83,10 @@ _PARAM_NAMES = [
     "release",
     "pw_start",
     "pw_delta",
-    "pw_min",
-    "pw_max",
-    "filter_cutoff_start",
-    "filter_cutoff_end",
+    "pw_center",
+    "pw_width",
+    "log_cutoff_start",
+    "log_cutoff_end",
     "filter_sweep_frames",
     "filter_resonance",
     "wt_attack_frames",
@@ -94,6 +95,75 @@ _PARAM_NAMES = [
 
 def _clip_int(v: float, lo: int, hi: int) -> int:
     return int(max(lo, min(hi, round(float(v)))))
+
+
+# ---------------------------------------------------------------------------
+# Active-parameter helpers for search-space trimming
+# ---------------------------------------------------------------------------
+
+# Index constants for the 13-element decision vector.
+_IDX_ADSR = [0, 1, 2, 3]           # attack, decay, sustain, release
+_IDX_PW = [4, 5, 6, 7]             # pw_start, pw_delta, pw_center, pw_width
+_IDX_FILTER = [8, 9, 10, 11]       # log_cutoff_start/end, sweep_frames, resonance
+_IDX_WT_ATTACK = [12]              # wt_attack_frames
+
+# Mid-range defaults for inactive dimensions (used when expanding reduced vectors).
+_MIDPOINT = 0.5 * (BOUNDS_LOW + BOUNDS_HIGH)
+
+
+def active_params(fixed_kwargs: dict) -> list:
+    """Return indices (into the 13-element vector) of parameters that matter.
+
+    Parameters that are irrelevant for the given discrete combo are excluded
+    so CMA-ES can focus covariance adaptation on the dimensions that actually
+    affect the rendered audio.
+
+    Rules:
+      - ADSR (0-3) and wt_attack_frames (12) are always active.
+      - PW params (4-7) are active only when pulse waveform is used
+        (sustain is pulse, or attack waveform contains "pulse").
+      - Filter params (8-11) are active only when filter_mode != "off".
+    """
+    indices = list(_IDX_ADSR)  # always include ADSR
+
+    # PW params: needed when any waveform involves pulse
+    sustain_wf = fixed_kwargs.get("wt_sustain_waveform") or ""
+    attack_wf = fixed_kwargs.get("wt_attack_waveform") or ""
+    needs_pw = sustain_wf == "pulse" or "pulse" in attack_wf
+    # Also check multi-step wavetable for any pulse waveform
+    wt_steps = fixed_kwargs.get("wavetable_steps")
+    if wt_steps:
+        for wf_name, _dur in wt_steps:
+            if "pulse" in wf_name:
+                needs_pw = True
+                break
+    if needs_pw:
+        indices.extend(_IDX_PW)
+
+    # Filter params: needed when filter is active
+    if fixed_kwargs.get("filter_mode") != "off":
+        indices.extend(_IDX_FILTER)
+
+    indices.extend(_IDX_WT_ATTACK)  # always include
+    return sorted(indices)
+
+
+def _expand_vector(x_reduced: np.ndarray, active_idx: list,
+                   bounds_high: np.ndarray) -> np.ndarray:
+    """Expand a reduced vector back to full N_DIMS using mid-range defaults.
+
+    Inactive dimensions get the midpoint of their bounds range.
+    """
+    midpoint = 0.5 * (BOUNDS_LOW + bounds_high)
+    full = midpoint.copy()
+    for i, idx in enumerate(active_idx):
+        full[idx] = x_reduced[i]
+    return full
+
+
+def _reduce_vector(x_full: np.ndarray, active_idx: list) -> np.ndarray:
+    """Extract only the active dimensions from a full vector."""
+    return x_full[active_idx].copy()
 
 
 def compute_render_duration(attack: int, decay: int, sustain: int, release: int) -> Tuple[int, int]:
@@ -118,10 +188,16 @@ def encode_params(sid_params: SidParams) -> np.ndarray:
     x[3] = sid_params.release
     x[4] = sid_params.effective_pw_start()
     x[5] = sid_params.pw_delta
-    x[6] = sid_params.pw_min
-    x[7] = sid_params.pw_max
-    x[8] = sid_params.effective_filter_cutoff_start()
-    x[9] = sid_params.effective_filter_cutoff_end()
+    # Encode pw_min/pw_max as pw_center/pw_width
+    pw_min = sid_params.pw_min
+    pw_max = sid_params.pw_max
+    x[6] = (pw_min + pw_max) / 2.0        # pw_center
+    x[7] = float(pw_max - pw_min)          # pw_width
+    # Encode filter cutoff in log2 space
+    cutoff_start = sid_params.effective_filter_cutoff_start()
+    cutoff_end = sid_params.effective_filter_cutoff_end()
+    x[8] = np.log2(cutoff_start + 1.0)    # log_cutoff_start
+    x[9] = np.log2(cutoff_end + 1.0)      # log_cutoff_end
     x[10] = sid_params.filter_sweep_frames
     x[11] = sid_params.filter_resonance
     x[12] = sid_params.wt_attack_frames
@@ -144,17 +220,19 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
     release = _clip_int(x[3], 0, 15)
     pw_start = _clip_int(x[4], 0, 4095)
     pw_delta = _clip_int(x[5], -50, 50)
-    pw_min_val = _clip_int(x[6], 0, 4095)
-    pw_max_val = _clip_int(x[7], 0, 4095)
-    filter_cutoff_start = _clip_int(x[8], 0, 2047)
-    filter_cutoff_end = _clip_int(x[9], 0, 2047)
+    # Decode pw_center/pw_width to pw_min/pw_max (guarantees pw_min <= pw_max)
+    pw_center = float(x[6])
+    pw_width = float(x[7])
+    pw_min_val = _clip_int(pw_center - pw_width / 2.0, 0, 4095)
+    pw_max_val = _clip_int(pw_center + pw_width / 2.0, 0, 4095)
+    # Decode log2-scale filter cutoff (clamp log value to [0, 11] before exp)
+    log_cutoff_start = max(0.0, min(11.0, float(x[8])))
+    log_cutoff_end = max(0.0, min(11.0, float(x[9])))
+    filter_cutoff_start = min(2047, max(0, round(2.0 ** log_cutoff_start - 1.0)))
+    filter_cutoff_end = min(2047, max(0, round(2.0 ** log_cutoff_end - 1.0)))
     filter_sweep_frames = _clip_int(x[10], 0, 100)
     filter_resonance = _clip_int(x[11], 0, 15)
     wt_attack_frames = _clip_int(x[12], 1, 5)
-
-    # Ensure pw_min <= pw_max
-    if pw_min_val > pw_max_val:
-        pw_min_val, pw_max_val = pw_max_val, pw_min_val
 
     kwargs = dict(fixed_kwargs)
 
@@ -172,6 +250,11 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
     wt_use_test_bit = bool(kwargs.get("wt_use_test_bit", False))
     filter_mode = str(kwargs.get("filter_mode", "off"))
     pw_mode = str(kwargs.get("pw_mode", "sweep"))
+
+    # Multi-step wavetable: passed as fixed discrete combo, durations baked in
+    wavetable_steps = kwargs.get("wavetable_steps")
+    if wavetable_steps is not None:
+        wavetable_steps = [tuple(s) for s in wavetable_steps]
 
     # Determine if filter voice1 should be enabled
     has_filter = filter_mode != "off"
@@ -200,6 +283,7 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
         wt_attack_waveform=wt_attack_waveform_str,
         wt_sustain_waveform=wt_sustain_waveform,
         wt_use_test_bit=wt_use_test_bit,
+        wavetable_steps=wavetable_steps,
         # PW sweep
         pw_start=pw_start,
         pw_delta=pw_delta,
@@ -220,6 +304,8 @@ def sid_params_to_dict(p: SidParams) -> dict:
         d["pw_table"] = [list(t) for t in d["pw_table"]]
     if d.get("wavetable") is not None:
         d["wavetable"] = [list(t) for t in d["wavetable"]]
+    if d.get("wavetable_steps") is not None:
+        d["wavetable_steps"] = [list(t) for t in d["wavetable_steps"]]
     return d
 
 
@@ -229,6 +315,8 @@ def sid_params_from_dict(d: dict) -> SidParams:
         kw["pw_table"] = [tuple(t) for t in kw["pw_table"]]
     if kw.get("wavetable"):
         kw["wavetable"] = [tuple(t) for t in kw["wavetable"]]
+    if kw.get("wavetable_steps"):
+        kw["wavetable_steps"] = [tuple(t) for t in kw["wavetable_steps"]]
     # Strip keys that are not SidParams fields (e.g. fitness_score, version).
     import dataclasses
     valid_fields = {f.name for f in dataclasses.fields(SidParams)}
@@ -280,6 +368,7 @@ _WORKER_REF_FV: Optional[FeatureVec] = None
 _WORKER_FIXED_KWARGS: Optional[dict] = None
 _WORKER_WEIGHTS: Optional[dict] = None
 _WORKER_BEST_FITNESS: Optional[mp.Value] = None
+_WORKER_RENDER_DUR: Optional[float] = None
 
 
 def _worker_init(
@@ -287,12 +376,15 @@ def _worker_init(
     fixed_kwargs: dict,
     weights: Optional[dict],
     best_fitness_val: Optional[mp.Value] = None,
+    render_dur: Optional[float] = None,
 ) -> None:
-    global _WORKER_REF_FV, _WORKER_FIXED_KWARGS, _WORKER_WEIGHTS, _WORKER_BEST_FITNESS
+    global _WORKER_REF_FV, _WORKER_FIXED_KWARGS, _WORKER_WEIGHTS
+    global _WORKER_BEST_FITNESS, _WORKER_RENDER_DUR
     _WORKER_REF_FV = _fv_from_dict(ref_fv_dict)
     _WORKER_FIXED_KWARGS = dict(fixed_kwargs)
     _WORKER_WEIGHTS = dict(weights) if weights else None
     _WORKER_BEST_FITNESS = best_fitness_val
+    _WORKER_RENDER_DUR = render_dur
 
 
 def _worker_eval(x_list: List[float]) -> float:
@@ -302,6 +394,12 @@ def _worker_eval(x_list: List[float]) -> float:
     chip_model = _WORKER_FIXED_KWARGS.get("chip_model")
     try:
         audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
+
+        # Truncate to current render duration tier for coarse-to-fine.
+        if _WORKER_RENDER_DUR is not None:
+            max_samples = int(_WORKER_RENDER_DUR * CANONICAL_SR)
+            if audio.shape[0] > max_samples:
+                audio = audio[:max_samples]
 
         # Early rejection: compute cheap partial fitness first.
         if _WORKER_BEST_FITNESS is not None:
@@ -325,12 +423,19 @@ def _eval_single(
     ref_fv: FeatureVec,
     weights: Optional[dict],
     best_fitness: float = float("inf"),
+    render_dur_s: Optional[float] = None,
 ) -> float:
     """In-process evaluation (used when n_workers=1)."""
     params = decode_params(x, fixed_kwargs)
     chip_model = fixed_kwargs.get("chip_model")
     try:
         audio = render_pyresid(params, sample_rate=CANONICAL_SR, chip_model=chip_model)
+
+        # Truncate to current render duration tier for coarse-to-fine.
+        if render_dur_s is not None:
+            max_samples = int(render_dur_s * CANONICAL_SR)
+            if audio.shape[0] > max_samples:
+                audio = audio[:max_samples]
 
         # Early rejection: compute cheap partial fitness first.
         if best_fitness < 1e5:
@@ -398,6 +503,14 @@ class OptimizerResult:
 class Optimizer:
     """CMA-ES optimizer over SID continuous patch parameters."""
 
+    # Coarse-to-fine render duration tiers: (fraction_of_budget, duration_s).
+    # Evaluated in order; the first tier whose threshold exceeds progress wins.
+    _DURATION_TIERS = [
+        (0.50, 0.5),   # first 50% of budget: 0.5 s
+        (0.80, 1.0),   # 50%–80% of budget: 1.0 s
+        (1.01, None),   # 80%–100%: full duration (None = no truncation)
+    ]
+
     def __init__(
         self,
         ref_wav_path: Optional[Path],
@@ -415,7 +528,13 @@ class Optimizer:
         ref_fv: Optional[FeatureVec] = None,
         x0: Optional[np.ndarray] = None,
         max_attack: int = 15,
+        onset_window_s: float = 2.0,
+        warm_start: bool = False,
+        use_surrogate: bool = True,
+        optimizer_backend: str = "cma",
     ) -> None:
+        self.use_surrogate = bool(use_surrogate)
+        self.optimizer_backend = optimizer_backend
         self.ref_frequency_hz = float(ref_frequency_hz)
         self.fixed_kwargs = dict(fixed_kwargs)
         self.fixed_kwargs.setdefault("frequency", self.ref_frequency_hz)
@@ -428,19 +547,58 @@ class Optimizer:
         self.log_interval = int(log_interval)
         self.max_attack = int(np.clip(max_attack, 0, 15))
         self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
+        self.onset_window_s = float(onset_window_s)
+        self.warm_start = bool(warm_start)
 
-        # Load reference features.
+        # Load reference audio and features.
         if ref_fv is not None:
             self.ref_fv = ref_fv
+            # Store ref audio for coarse-to-fine re-extraction.
+            if ref_audio is not None:
+                self._ref_audio = np.asarray(ref_audio, dtype=np.float32)
+                if ref_sr is not None and ref_sr != CANONICAL_SR:
+                    self._ref_audio = librosa.resample(
+                        self._ref_audio, orig_sr=ref_sr, target_sr=CANONICAL_SR,
+                    )
+            else:
+                self._ref_audio = None
         elif ref_audio is not None and ref_sr is not None:
             audio = np.asarray(ref_audio, dtype=np.float32)
             sr = int(ref_sr)
-            self.ref_fv = extract(audio, sr)
+            if sr != CANONICAL_SR:
+                audio = librosa.resample(audio, orig_sr=sr, target_sr=CANONICAL_SR)
+            self._ref_audio = audio
+            self.ref_fv = extract(audio, CANONICAL_SR)
         elif ref_wav_path is not None:
-            audio, sr = load_reference_audio(Path(ref_wav_path))
+            audio, sr = load_reference_audio(Path(ref_wav_path), onset_window_s=self.onset_window_s)
+            self._ref_audio = audio  # already at CANONICAL_SR
             self.ref_fv = extract(audio, sr)
         else:
             raise ValueError("must provide ref_fv, ref_wav_path, or ref_audio+ref_sr")
+
+    def _render_duration_for_eval(self, eval_count: int) -> Optional[float]:
+        """Return the render duration in seconds for the current eval count.
+
+        Returns None when full duration should be used (no truncation).
+        """
+        progress = eval_count / max(1, self.budget)
+        for threshold, dur_s in self._DURATION_TIERS:
+            if progress < threshold:
+                return dur_s
+        return None  # full duration
+
+    def _ref_fv_for_duration(self, dur_s: Optional[float]) -> FeatureVec:
+        """Return reference features truncated to *dur_s* seconds.
+
+        If dur_s is None or no ref audio is stored, returns the full ref_fv.
+        """
+        if dur_s is None or self._ref_audio is None:
+            return self.ref_fv
+        max_samples = int(dur_s * CANONICAL_SR)
+        if self._ref_audio.shape[0] <= max_samples:
+            return self.ref_fv
+        truncated = self._ref_audio[:max_samples]
+        return extract(truncated, CANONICAL_SR)
 
     # ---------- checkpoint helpers ----------
 
@@ -491,71 +649,301 @@ class Optimizer:
     # ---------- main loop ----------
 
     def run(self) -> OptimizerResult:
+        if self.optimizer_backend == "tpe":
+            return self._run_tpe()
+        return self._run_cma()
+
+    def _run_tpe(self) -> OptimizerResult:
+        """Optuna TPE optimization path."""
+        try:
+            import optuna
+        except ImportError:
+            raise ImportError(
+                "optuna is required for TPE optimizer: pip install optuna"
+            )
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
         t0 = time.time()
-        # Build local bounds with max_attack constraint.
         bounds_high = BOUNDS_HIGH.copy()
         bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
-        # Start from caller-provided x0 or the mid-range point.
-        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + bounds_high)
-        # Ensure x0 is within adjusted bounds.
-        x0 = np.clip(x0, BOUNDS_LOW, bounds_high)
-        # sigma0 = one quarter of the average range.
-        mean_range = float((bounds_high - BOUNDS_LOW).mean())
-        sigma0 = mean_range / 6.0
 
-        cma_opts = {
-            "bounds": [BOUNDS_LOW.tolist(), bounds_high.tolist()],
-            "seed": self.seed if self.seed != 0 else 1,
-            "verbose": -9,
-            "maxfevals": self.budget,
-            "CMA_stds": (bounds_high - BOUNDS_LOW).tolist(),
-        }
-        es = cma.CMAEvolutionStrategy(x0.tolist(), sigma0, cma_opts)
+        act_idx = active_params(self.fixed_kwargs)
+        n_active = len(act_idx)
+
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x: np.ndarray = x0.copy()
+        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
         evaluations = 0
         non_improve = 0
         converged = False
 
+        # Coarse-to-fine: current render duration tier and matching ref features.
+        current_render_dur = self._render_duration_for_eval(0)
+        current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+
+        def objective(trial):
+            nonlocal evaluations, best_fitness, best_x_full, non_improve
+            nonlocal converged, current_render_dur, current_ref_fv
+
+            # Check if render duration tier has changed.
+            new_render_dur = self._render_duration_for_eval(evaluations)
+            if new_render_dur != current_render_dur:
+                current_render_dur = new_render_dur
+                current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                best_fitness = float("inf")
+                non_improve = 0
+
+            # Sample each active param in [0, 1] (normalized).
+            x_norm = np.array(
+                [trial.suggest_float(f"p{i}", 0.0, 1.0) for i in range(n_active)]
+            )
+            x_red = _denormalize(x_norm)
+            x_full = _expand_vector(x_red, act_idx, bounds_high)
+
+            fitness = _eval_single(
+                x_full, self.fixed_kwargs, current_ref_fv,
+                self.weights, best_fitness=best_fitness,
+                render_dur_s=current_render_dur,
+            )
+
+            evaluations += 1
+            if fitness < best_fitness - 1e-9:
+                best_fitness = fitness
+                best_x_full = x_full.copy()
+                non_improve = 0
+            else:
+                non_improve += 1
+            history.append(best_fitness)
+
+            # Checkpoint every ~100 evals.
+            if self.work_dir is not None and evaluations % 100 == 0:
+                self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+            # Log progress.
+            if self.log_interval > 0 and evaluations % self.log_interval == 0:
+                elapsed = time.time() - t0
+                print(
+                    f"[optim-tpe] evals={evaluations}/{self.budget} "
+                    f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                    flush=True,
+                )
+
+            # Patience stop via pruning.
+            if non_improve >= self.patience:
+                converged = True
+                study.stop()
+
+            return fitness
+
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, self.budget // 2),
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
+        study.optimize(objective, n_trials=self.budget, n_jobs=1)
+
+        # Final checkpoint.
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+        wall = time.time() - t0
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
+        return OptimizerResult(
+            best_params=best_params,
+            best_fitness=best_fitness,
+            history=history,
+            evaluations=evaluations,
+            wall_time_s=wall,
+            converged=converged,
+        )
+
+    def _run_cma(self) -> OptimizerResult:
+        t0 = time.time()
+        # Build local bounds with max_attack constraint.
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+
+        # Determine active parameter indices for this combo.
+        act_idx = active_params(self.fixed_kwargs)
+        n_active = len(act_idx)
+
+        # Build reduced bounds for CMA-ES (only active dimensions).
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+
+        # Normalization helpers: CMA-ES operates in [0,1] hypercube.
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)  # avoid div-by-zero
+
+        def _normalize(x_orig):
+            return (x_orig - lo_red) / range_red_safe
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
+
+        # Start from caller-provided x0 or the mid-range point.
+        if self.x0 is not None:
+            x0_full = np.clip(self.x0, BOUNDS_LOW, bounds_high)
+        else:
+            x0_full = 0.5 * (BOUNDS_LOW + bounds_high)
+        x0_red = _reduce_vector(x0_full, act_idx)
+        x0_norm = _normalize(x0_red)
+
+        # sigma0 in normalized [0,1] space: ~1/6 of range normally, ~1/10 for warm-start.
+        sigma0 = 0.10 if self.warm_start else 0.17
+
+        cma_opts = {
+            "bounds": [np.zeros(n_active).tolist(), np.ones(n_active).tolist()],
+            "seed": self.seed if self.seed != 0 else 1,
+            "verbose": -9,
+            "maxfevals": self.budget,
+        }
+        es = cma.CMAEvolutionStrategy(x0_norm.tolist(), sigma0, cma_opts)
+
+        history: List[float] = []
+        best_fitness = float("inf")
+        best_x_full: np.ndarray = x0_full.copy()
+        evaluations = 0
+        non_improve = 0
+        converged = False
+
+        # Surrogate model for pre-screening candidates.
+        surrogate: Optional[FitnessSurrogate] = None
+        surr_X: List[np.ndarray] = []  # accumulated normalized param vectors
+        surr_y: List[float] = []       # accumulated fitness values
+        surr_train_threshold = 500     # first training after this many evals
+        surr_retrain_interval = 200    # retrain every N evals after that
+        surr_last_train_count = 0      # evals at last training
+
+        # Coarse-to-fine: current render duration tier and matching ref features.
+        current_render_dur = self._render_duration_for_eval(0)
+        current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+
         # Build pool if parallel.
         pool = None
         best_fitness_shared = None
-        ref_fv_dict = _fv_to_dict(self.ref_fv)
+        ref_fv_dict = _fv_to_dict(current_ref_fv)
         if self.n_workers > 1:
             best_fitness_shared = mp.Value('d', float('inf'))
             ctx = mp.get_context("fork")
             pool = ctx.Pool(
                 processes=self.n_workers,
                 initializer=_worker_init,
-                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights, best_fitness_shared),
+                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                          best_fitness_shared, current_render_dur),
             )
 
         try:
             while evaluations < self.budget:
                 if es.stop():
                     break
-                solutions = es.ask()
-                solutions_list = [list(s) for s in solutions]
-                if pool is not None:
-                    fitnesses = pool.map(_worker_eval, solutions_list)
-                else:
-                    fitnesses = [
-                        _eval_single(
-                            np.asarray(s), self.fixed_kwargs, self.ref_fv,
-                            self.weights, best_fitness=best_fitness,
-                        )
-                        for s in solutions_list
-                    ]
-                es.tell(solutions, fitnesses)
 
-                evaluations += len(fitnesses)
+                # Check if render duration tier has changed.
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    ref_fv_dict = _fv_to_dict(current_ref_fv)
+                    # Reset best fitness since features changed with new duration.
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    # Reset surrogate data since fitness landscape changed.
+                    surr_X.clear()
+                    surr_y.clear()
+                    surrogate = None
+                    surr_last_train_count = 0
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = float("inf")
+                    # Re-create pool with updated ref features and render dur.
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=self.n_workers,
+                            initializer=_worker_init,
+                            initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                                      best_fitness_shared, current_render_dur),
+                        )
+
+                solutions_norm = es.ask()
+                # Denormalize from [0,1] back to original ranges, then expand.
+                solutions_full = [
+                    _expand_vector(_denormalize(np.asarray(s)), act_idx, bounds_high)
+                    for s in solutions_norm
+                ]
+                solutions_full_list = [list(s) for s in solutions_full]
+
+                # Surrogate pre-screening: evaluate all with surrogate,
+                # only run expensive eval on the top 50%.
+                eval_indices = list(range(len(solutions_norm)))
+                surr_predictions: Optional[np.ndarray] = None
+                if self.use_surrogate and surrogate is not None and surrogate.is_ready:
+                    norm_arr = np.array(solutions_norm, dtype=np.float64)
+                    surr_predictions = surrogate.predict(norm_arr)
+                    n_keep = max(1, len(solutions_norm) // 2)
+                    ranked = np.argsort(surr_predictions)
+                    eval_indices = sorted(ranked[:n_keep].tolist())
+
+                # Run expensive evaluation only on selected candidates.
+                eval_full_list = [solutions_full_list[i] for i in eval_indices]
+                if pool is not None:
+                    eval_fitnesses = pool.map(_worker_eval, eval_full_list)
+                else:
+                    eval_fitnesses = [
+                        _eval_single(
+                            np.asarray(s), self.fixed_kwargs, current_ref_fv,
+                            self.weights, best_fitness=best_fitness,
+                            render_dur_s=current_render_dur,
+                        )
+                        for s in eval_full_list
+                    ]
+
+                # Build full fitness list: real values for evaluated, surrogate for rest.
+                fitnesses = [0.0] * len(solutions_norm)
+                eval_map = dict(zip(eval_indices, eval_fitnesses))
+                for i in range(len(solutions_norm)):
+                    if i in eval_map:
+                        fitnesses[i] = eval_map[i]
+                    elif surr_predictions is not None:
+                        fitnesses[i] = float(surr_predictions[i])
+                    else:
+                        fitnesses[i] = 1e6  # should not happen
+
+                es.tell(solutions_norm, fitnesses)
+
+                # Accumulate data for surrogate training.
+                if self.use_surrogate:
+                    for i in eval_indices:
+                        surr_X.append(np.asarray(solutions_norm[i], dtype=np.float64))
+                        surr_y.append(eval_map[i])
+
+                    # Train/retrain surrogate when enough data has accumulated.
+                    total_surr = len(surr_y)
+                    if total_surr >= surr_train_threshold and (
+                        surrogate is None
+                        or total_surr - surr_last_train_count >= surr_retrain_interval
+                    ):
+                        if surrogate is None:
+                            surrogate = FitnessSurrogate(input_dim=n_active)
+                        surrogate.fit(np.array(surr_X), np.array(surr_y))
+                        surr_last_train_count = total_surr
+
+                evaluations += len(eval_fitnesses)
                 gen_best = float(min(fitnesses))
                 gen_best_idx = int(np.argmin(fitnesses))
                 if gen_best < best_fitness - 1e-9:
                     best_fitness = gen_best
-                    best_x = np.asarray(solutions_list[gen_best_idx], dtype=np.float64)
+                    best_x_full = np.asarray(solutions_full_list[gen_best_idx], dtype=np.float64)
                     non_improve = 0
                     if best_fitness_shared is not None:
                         best_fitness_shared.value = best_fitness
@@ -571,7 +959,7 @@ class Optimizer:
                     elapsed = time.time() - t0
                     print(
                         f"[optim] evals={evaluations}/{self.budget} "
-                        f"best={best_fitness:.4f} t={elapsed:.1f}s",
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
                         flush=True,
                     )
 
@@ -580,7 +968,7 @@ class Optimizer:
                     evaluations // 100
                     != (evaluations - len(fitnesses)) // 100
                 ):
-                    self._save_checkpoint(best_x, best_fitness, history, evaluations)
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
 
                 # Patience stop.
                 if non_improve >= self.patience:
@@ -592,10 +980,10 @@ class Optimizer:
                 pool.join()
 
         # Final checkpoint.
-        self._save_checkpoint(best_x, best_fitness, history, evaluations)
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
 
         wall = time.time() - t0
-        best_params = decode_params(best_x, self.fixed_kwargs)
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
         return OptimizerResult(
             best_params=best_params,
             best_fitness=best_fitness,
@@ -616,18 +1004,22 @@ _MN_WORKER_FIXED_KWARGS: Optional[dict] = None
 _MN_WORKER_WEIGHTS: Optional[dict] = None
 _MN_WORKER_ALPHA: float = 0.25
 _MN_WORKER_REF_SET = None
+_MN_WORKER_RENDER_DUR: Optional[float] = None
 
 
 def _mn_worker_init(
     ref_set_data: list, fixed_kwargs: dict,
     weights: Optional[dict], alpha: float,
+    render_dur: Optional[float] = None,
 ) -> None:
     global _MN_WORKER_REF_SET_DATA, _MN_WORKER_FIXED_KWARGS
     global _MN_WORKER_WEIGHTS, _MN_WORKER_ALPHA, _MN_WORKER_REF_SET
+    global _MN_WORKER_RENDER_DUR
     _MN_WORKER_REF_SET_DATA = ref_set_data
     _MN_WORKER_FIXED_KWARGS = dict(fixed_kwargs)
     _MN_WORKER_WEIGHTS = dict(weights) if weights else None
     _MN_WORKER_ALPHA = alpha
+    _MN_WORKER_RENDER_DUR = render_dur
 
     # Build the ReferenceSet once at worker init instead of per evaluation.
     from .multi_note import ReferenceSet, NoteRef
@@ -656,6 +1048,7 @@ def _mn_worker_eval(x_list: List[float]) -> float:
             weights=_MN_WORKER_WEIGHTS,
             alpha=_MN_WORKER_ALPHA,
             chip_model=chip_model,
+            render_duration_s=_MN_WORKER_RENDER_DUR,
         ))
     except Exception:
         return 1e6
@@ -687,6 +1080,9 @@ class MultiNoteOptimizer:
     inside the fitness function.
     """
 
+    # Same coarse-to-fine tiers as Optimizer.
+    _DURATION_TIERS = Optimizer._DURATION_TIERS
+
     def __init__(
         self,
         ref_set,
@@ -701,7 +1097,13 @@ class MultiNoteOptimizer:
         log_interval: int = 100,
         x0: Optional[np.ndarray] = None,
         max_attack: int = 15,
+        onset_window_s: float = 2.0,
+        warm_start: bool = False,
+        use_surrogate: bool = True,
+        optimizer_backend: str = "cma",
     ) -> None:
+        self.use_surrogate = bool(use_surrogate)
+        self.optimizer_backend = optimizer_backend
         self.ref_set = ref_set
         self.fixed_kwargs = dict(fixed_kwargs)
         self.weights = dict(weights) if weights else None
@@ -714,6 +1116,26 @@ class MultiNoteOptimizer:
         self.log_interval = int(log_interval)
         self.max_attack = int(np.clip(max_attack, 0, 15))
         self.x0 = np.asarray(x0, dtype=np.float64) if x0 is not None else None
+        self.onset_window_s = float(onset_window_s)
+        self.warm_start = bool(warm_start)
+
+    def _render_duration_for_eval(self, eval_count: int) -> Optional[float]:
+        """Return the render duration in seconds for the current eval count."""
+        progress = eval_count / max(1, self.budget)
+        for threshold, dur_s in self._DURATION_TIERS:
+            if progress < threshold:
+                return dur_s
+        return None
+
+    def _ref_set_for_duration(self, dur_s: Optional[float]):
+        """Return a ReferenceSet with features re-extracted at *dur_s*.
+
+        If dur_s is None, returns the original ref_set. Otherwise truncates
+        each note's ref audio and re-extracts features. For multi-note we
+        don't have raw audio stored per note, so we just pass the duration
+        to multi_note_fitness which truncates the candidate audio instead.
+        """
+        return self.ref_set
 
     def _checkpoint_path(self) -> Optional[Path]:
         if self.work_dir is None:
@@ -754,58 +1176,249 @@ class MultiNoteOptimizer:
         os.replace(tmp, path)
 
     def run(self) -> OptimizerResult:
+        if self.optimizer_backend == "tpe":
+            return self._run_tpe()
+        return self._run_cma()
+
+    def _run_tpe(self) -> OptimizerResult:
+        """Optuna TPE optimization path for multi-note."""
+        try:
+            import optuna
+        except ImportError:
+            raise ImportError(
+                "optuna is required for TPE optimizer: pip install optuna"
+            )
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        from .multi_note import multi_note_fitness
+
+        t0 = time.time()
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+
+        act_idx = active_params(self.fixed_kwargs)
+        n_active = len(act_idx)
+
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
+
+        history: List[float] = []
+        best_fitness = float("inf")
+        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        evaluations = 0
+        non_improve = 0
+        converged = False
+
+        current_render_dur = self._render_duration_for_eval(0)
+        chip_model = self.fixed_kwargs.get("chip_model")
+
+        def objective(trial):
+            nonlocal evaluations, best_fitness, best_x_full, non_improve
+            nonlocal converged, current_render_dur
+
+            new_render_dur = self._render_duration_for_eval(evaluations)
+            if new_render_dur != current_render_dur:
+                current_render_dur = new_render_dur
+                best_fitness = float("inf")
+                non_improve = 0
+
+            x_norm = np.array(
+                [trial.suggest_float(f"p{i}", 0.0, 1.0) for i in range(n_active)]
+            )
+            x_red = _denormalize(x_norm)
+            x_full = _expand_vector(x_red, act_idx, bounds_high)
+
+            params = decode_params(x_full, self.fixed_kwargs)
+            try:
+                fitness = float(multi_note_fitness(
+                    params, self.ref_set,
+                    weights=self.weights,
+                    alpha=self.alpha,
+                    chip_model=chip_model,
+                    render_duration_s=current_render_dur,
+                ))
+            except Exception:
+                fitness = 1e6
+
+            evaluations += 1
+            if fitness < best_fitness - 1e-9:
+                best_fitness = fitness
+                best_x_full = x_full.copy()
+                non_improve = 0
+            else:
+                non_improve += 1
+            history.append(best_fitness)
+
+            if self.work_dir is not None and evaluations % 100 == 0:
+                self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+            if self.log_interval > 0 and evaluations % self.log_interval == 0:
+                elapsed = time.time() - t0
+                print(
+                    f"[optim-mn-tpe] evals={evaluations}/{self.budget} "
+                    f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                    flush=True,
+                )
+
+            if non_improve >= self.patience:
+                converged = True
+                study.stop()
+
+            return fitness
+
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, self.budget // 2),
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
+        study.optimize(objective, n_trials=self.budget, n_jobs=1)
+
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+        wall = time.time() - t0
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
+        return OptimizerResult(
+            best_params=best_params,
+            best_fitness=best_fitness,
+            history=history,
+            evaluations=evaluations,
+            wall_time_s=wall,
+            converged=converged,
+        )
+
+    def _run_cma(self) -> OptimizerResult:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
         # Build local bounds with max_attack constraint.
         bounds_high = BOUNDS_HIGH.copy()
         bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+
+        # Determine active parameter indices for this combo.
+        act_idx = active_params(self.fixed_kwargs)
+        n_active = len(act_idx)
+
+        # Build reduced bounds for CMA-ES (only active dimensions).
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+
+        # Normalization helpers: CMA-ES operates in [0,1] hypercube.
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)
+
+        def _normalize(x_orig):
+            return (x_orig - lo_red) / range_red_safe
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
+
         # Start from caller-provided x0 or the mid-range point.
-        x0 = self.x0 if self.x0 is not None else 0.5 * (BOUNDS_LOW + bounds_high)
-        # Ensure x0 is within adjusted bounds.
-        x0 = np.clip(x0, BOUNDS_LOW, bounds_high)
-        mean_range = float((bounds_high - BOUNDS_LOW).mean())
-        sigma0 = mean_range / 6.0
+        if self.x0 is not None:
+            x0_full = np.clip(self.x0, BOUNDS_LOW, bounds_high)
+        else:
+            x0_full = 0.5 * (BOUNDS_LOW + bounds_high)
+        x0_red = _reduce_vector(x0_full, act_idx)
+        x0_norm = _normalize(x0_red)
+
+        sigma0 = 0.10 if self.warm_start else 0.17
 
         cma_opts = {
-            "bounds": [BOUNDS_LOW.tolist(), bounds_high.tolist()],
+            "bounds": [np.zeros(n_active).tolist(), np.ones(n_active).tolist()],
             "seed": self.seed if self.seed != 0 else 1,
             "verbose": -9,
             "maxfevals": self.budget,
-            "CMA_stds": (bounds_high - BOUNDS_LOW).tolist(),
         }
-        es = cma.CMAEvolutionStrategy(x0.tolist(), sigma0, cma_opts)
+        es = cma.CMAEvolutionStrategy(x0_norm.tolist(), sigma0, cma_opts)
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x: np.ndarray = x0.copy()
+        best_x_full: np.ndarray = x0_full.copy()
         evaluations = 0
         non_improve = 0
         converged = False
 
+        # Surrogate model for pre-screening candidates.
+        surrogate: Optional[FitnessSurrogate] = None
+        surr_X: List[np.ndarray] = []
+        surr_y: List[float] = []
+        surr_train_threshold = 500
+        surr_retrain_interval = 200
+        surr_last_train_count = 0
+
+        # Coarse-to-fine: current render duration tier.
+        current_render_dur = self._render_duration_for_eval(0)
+        ref_set_data = _ref_set_to_data(self.ref_set)
+
         pool = None
         if self.n_workers > 1:
-            ref_set_data = _ref_set_to_data(self.ref_set)
             ctx = mp.get_context("fork")
             pool = ctx.Pool(
                 processes=self.n_workers,
                 initializer=_mn_worker_init,
-                initargs=(ref_set_data, self.fixed_kwargs, self.weights, self.alpha),
+                initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                          self.alpha, current_render_dur),
             )
 
         try:
             while evaluations < self.budget:
                 if es.stop():
                     break
-                solutions = es.ask()
-                solutions_list = [list(s) for s in solutions]
 
+                # Check if render duration tier has changed.
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    # Reset best fitness since feature comparison changed.
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    # Reset surrogate data since fitness landscape changed.
+                    surr_X.clear()
+                    surr_y.clear()
+                    surrogate = None
+                    surr_last_train_count = 0
+                    # Re-create pool with updated render dur.
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=self.n_workers,
+                            initializer=_mn_worker_init,
+                            initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                                      self.alpha, current_render_dur),
+                        )
+
+                solutions_norm = es.ask()
+                # Denormalize from [0,1] back to original ranges, then expand.
+                solutions_full = [
+                    _expand_vector(_denormalize(np.asarray(s)), act_idx, bounds_high)
+                    for s in solutions_norm
+                ]
+                solutions_full_list = [list(s) for s in solutions_full]
+
+                # Surrogate pre-screening.
+                eval_indices = list(range(len(solutions_norm)))
+                surr_predictions: Optional[np.ndarray] = None
+                if self.use_surrogate and surrogate is not None and surrogate.is_ready:
+                    norm_arr = np.array(solutions_norm, dtype=np.float64)
+                    surr_predictions = surrogate.predict(norm_arr)
+                    n_keep = max(1, len(solutions_norm) // 2)
+                    ranked = np.argsort(surr_predictions)
+                    eval_indices = sorted(ranked[:n_keep].tolist())
+
+                eval_full_list = [solutions_full_list[i] for i in eval_indices]
                 if pool is not None:
-                    fitnesses = pool.map(_mn_worker_eval, solutions_list)
+                    eval_fitnesses = pool.map(_mn_worker_eval, eval_full_list)
                 else:
-                    fitnesses = []
+                    eval_fitnesses = []
                     chip_model = self.fixed_kwargs.get("chip_model")
-                    for s in solutions_list:
+                    for s in eval_full_list:
                         x = np.asarray(s, dtype=np.float64)
                         params = decode_params(x, self.fixed_kwargs)
                         try:
@@ -814,19 +1427,46 @@ class MultiNoteOptimizer:
                                 weights=self.weights,
                                 alpha=self.alpha,
                                 chip_model=chip_model,
+                                render_duration_s=current_render_dur,
                             ))
                         except Exception:
                             f = 1e6
-                        fitnesses.append(f)
+                        eval_fitnesses.append(f)
 
-                es.tell(solutions, fitnesses)
+                # Build full fitness list.
+                fitnesses = [0.0] * len(solutions_norm)
+                eval_map = dict(zip(eval_indices, eval_fitnesses))
+                for i in range(len(solutions_norm)):
+                    if i in eval_map:
+                        fitnesses[i] = eval_map[i]
+                    elif surr_predictions is not None:
+                        fitnesses[i] = float(surr_predictions[i])
+                    else:
+                        fitnesses[i] = 1e6
 
-                evaluations += len(fitnesses)
+                es.tell(solutions_norm, fitnesses)
+
+                # Accumulate data for surrogate training.
+                if self.use_surrogate:
+                    for i in eval_indices:
+                        surr_X.append(np.asarray(solutions_norm[i], dtype=np.float64))
+                        surr_y.append(eval_map[i])
+                    total_surr = len(surr_y)
+                    if total_surr >= surr_train_threshold and (
+                        surrogate is None
+                        or total_surr - surr_last_train_count >= surr_retrain_interval
+                    ):
+                        if surrogate is None:
+                            surrogate = FitnessSurrogate(input_dim=n_active)
+                        surrogate.fit(np.array(surr_X), np.array(surr_y))
+                        surr_last_train_count = total_surr
+
+                evaluations += len(eval_fitnesses)
                 gen_best = float(min(fitnesses))
                 gen_best_idx = int(np.argmin(fitnesses))
                 if gen_best < best_fitness - 1e-9:
                     best_fitness = gen_best
-                    best_x = np.asarray(solutions_list[gen_best_idx], dtype=np.float64)
+                    best_x_full = np.asarray(solutions_full_list[gen_best_idx], dtype=np.float64)
                     non_improve = 0
                 else:
                     non_improve += len(fitnesses)
@@ -839,7 +1479,7 @@ class MultiNoteOptimizer:
                     elapsed = time.time() - t0
                     print(
                         f"[optim-mn] evals={evaluations}/{self.budget} "
-                        f"best={best_fitness:.4f} t={elapsed:.1f}s",
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
                         flush=True,
                     )
 
@@ -847,7 +1487,7 @@ class MultiNoteOptimizer:
                     evaluations // 100
                     != (evaluations - len(fitnesses)) // 100
                 ):
-                    self._save_checkpoint(best_x, best_fitness, history, evaluations)
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
 
                 if non_improve >= self.patience:
                     converged = True
@@ -857,10 +1497,10 @@ class MultiNoteOptimizer:
                 pool.close()
                 pool.join()
 
-        self._save_checkpoint(best_x, best_fitness, history, evaluations)
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
 
         wall = time.time() - t0
-        best_params = decode_params(best_x, self.fixed_kwargs)
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
         return OptimizerResult(
             best_params=best_params,
             best_fitness=best_fitness,

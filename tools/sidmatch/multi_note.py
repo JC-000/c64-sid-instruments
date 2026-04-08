@@ -160,6 +160,7 @@ def multi_note_fitness(
     weights: Optional[Mapping[str, float]] = None,
     alpha: float = 0.15,
     chip_model: Optional[str] = None,
+    render_duration_s: Optional[float] = None,
 ) -> float:
     """Evaluate *params* against all notes in *ref_set*.
 
@@ -183,6 +184,9 @@ def multi_note_fitness(
         Blend between mean and max.  0 = pure mean, 1 = pure max.
     chip_model : str, optional
         SID chip model override for rendering.
+    render_duration_s : float, optional
+        If set, truncate both candidate and reference audio to this duration
+        for coarse-to-fine optimization.  ``None`` means use full duration.
 
     Returns
     -------
@@ -204,13 +208,25 @@ def multi_note_fitness(
             audio = render_pyresid(
                 note_params, sample_rate=CANONICAL_SR, chip_model=chip_model
             )
+
+            # Coarse-to-fine: truncate candidate audio if duration is capped.
+            if render_duration_s is not None:
+                max_samples = int(render_duration_s * CANONICAL_SR)
+                if audio.shape[0] > max_samples:
+                    audio = audio[:max_samples]
+
             # Match durations: pad SID render with silence to match the
             # reference length so envelope/spectral comparisons are fair.
             # Without this, a 1.3s SID render is compared against a 2.0s
             # reference window, unfairly penalising the SID's shorter tail.
-            ref_dur_samples = int(note_ref.ref_fv.duration_s * CANONICAL_SR)
-            if audio.shape[0] < ref_dur_samples:
-                pad = np.zeros(ref_dur_samples - audio.shape[0], dtype=audio.dtype)
+            # When using coarse-to-fine, use the truncated duration as
+            # the comparison target instead of the full reference duration.
+            if render_duration_s is not None:
+                target_samples = int(render_duration_s * CANONICAL_SR)
+            else:
+                target_samples = int(note_ref.ref_fv.duration_s * CANONICAL_SR)
+            if audio.shape[0] < target_samples:
+                pad = np.zeros(target_samples - audio.shape[0], dtype=audio.dtype)
                 audio = np.concatenate([audio, pad])
             fv = extract(audio, CANONICAL_SR, known_f0=note_ref.freq_hz)
             d = distance(note_ref.ref_fv, fv, weights=mn_weights)

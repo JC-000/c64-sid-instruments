@@ -1,36 +1,46 @@
 {
   "waveform": "saw",
-  "attack": 3,
-  "decay": 8,
-  "sustain": 12,
-  "release": 12,
-  "pulse_width": 3211,
+  "attack": 0,
+  "decay": 3,
+  "sustain": 2,
+  "release": 14,
+  "pulse_width": 3605,
   "pw_table": null,
-  "filter_cutoff": 1010,
-  "filter_resonance": 4,
-  "filter_mode": "lp",
-  "filter_voice1": true,
+  "filter_cutoff": 44,
+  "filter_resonance": 8,
+  "filter_mode": "off",
+  "filter_voice1": false,
   "ring_mod": false,
   "sync": false,
   "frequency": 440.0,
-  "gate_frames": 21,
-  "release_frames": 155,
+  "gate_frames": 10,
+  "release_frames": 250,
   "wavetable": null,
   "volume": 15,
   "chip_model": "6581",
   "source_instrument": "Philharmonia Orchestra (CC-BY-SA 3.0)",
-  "wt_attack_frames": 5,
-  "wt_attack_waveform": "saw+triangle",
+  "wt_attack_frames": 3,
+  "wt_attack_waveform": "pulse+saw",
   "wt_sustain_waveform": "saw",
-  "wt_use_test_bit": true,
-  "pw_start": 3211,
-  "pw_delta": 38,
-  "pw_min": 2705,
-  "pw_max": 2918,
+  "wt_use_test_bit": false,
+  "pw_start": 3605,
+  "pw_delta": -35,
+  "pw_min": 0,
+  "pw_max": 2469,
   "pw_mode": "sweep",
-  "filter_cutoff_start": 1010,
-  "filter_cutoff_end": 300,
-  "filter_sweep_frames": 8,
+  "wavetable_steps": [
+    [
+      "pulse+saw",
+      2
+    ],
+    [
+      "saw",
+      0
+    ]
+  ],
+  "filter_cutoff_start": 44,
+  "filter_cutoff_end": 44,
+  "filter_sweep_frames": 50,
   "reference_notes": [
     {
       "note": "E2",
@@ -74,5 +84,5 @@
     }
   ],
   "fitness_score": 0.0,
-  "version": 4
+  "version": 5
 }
