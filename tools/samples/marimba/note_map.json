@@ -1,0 +1,38 @@
+{
+  "C3": {
+    "freq_hz": 130.81,
+    "file": "iowa-marimba-C3-ff.wav"
+  },
+  "Eb3": {
+    "freq_hz": 155.56,
+    "file": "iowa-marimba-Eb3-ff.wav"
+  },
+  "Gb3": {
+    "freq_hz": 185.0,
+    "file": "iowa-marimba-Gb3-ff.wav"
+  },
+  "A3": {
+    "freq_hz": 220.0,
+    "file": "iowa-marimba-A3-ff.wav"
+  },
+  "C4": {
+    "freq_hz": 261.63,
+    "file": "iowa-marimba-C4-ff.wav"
+  },
+  "Eb4": {
+    "freq_hz": 311.13,
+    "file": "iowa-marimba-Eb4-ff.wav"
+  },
+  "Gb4": {
+    "freq_hz": 369.99,
+    "file": "iowa-marimba-Gb4-ff.wav"
+  },
+  "A4": {
+    "freq_hz": 440.0,
+    "file": "iowa-marimba-A4-ff.wav"
+  },
+  "C5": {
+    "freq_hz": 523.25,
+    "file": "iowa-marimba-C5-ff.wav"
+  }
+}

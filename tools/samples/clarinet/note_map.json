@@ -1,0 +1,38 @@
+{
+  "D3": {
+    "freq_hz": 146.83,
+    "file": "iowa-clarinet-D3-ff.wav"
+  },
+  "F3": {
+    "freq_hz": 174.61,
+    "file": "iowa-clarinet-F3-ff.wav"
+  },
+  "Ab3": {
+    "freq_hz": 207.65,
+    "file": "iowa-clarinet-Ab3-ff.wav"
+  },
+  "B3": {
+    "freq_hz": 246.94,
+    "file": "iowa-clarinet-B3-ff.wav"
+  },
+  "D4": {
+    "freq_hz": 293.66,
+    "file": "iowa-clarinet-D4-ff.wav"
+  },
+  "F4": {
+    "freq_hz": 349.23,
+    "file": "iowa-clarinet-F4-ff.wav"
+  },
+  "Ab4": {
+    "freq_hz": 415.3,
+    "file": "iowa-clarinet-Ab4-ff.wav"
+  },
+  "B4": {
+    "freq_hz": 493.88,
+    "file": "iowa-clarinet-B4-ff.wav"
+  },
+  "D5": {
+    "freq_hz": 587.33,
+    "file": "iowa-clarinet-D5-ff.wav"
+  }
+}
