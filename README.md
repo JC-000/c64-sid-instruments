@@ -23,6 +23,16 @@ instruments/
       sid_render.wav
 ```
 
+## Instruments
+
+| Instrument | 6581 | 8580 | Notes |
+|---|---|---|---|
+| [Grand Piano](instruments/grand-piano/) | v9 | v10 | Multi-note chromatic evaluation (C3--C5, 9 pitches) |
+| [Acoustic Guitar](instruments/acoustic-guitar/) | v5 | v6 | |
+| [Violin](instruments/violin/) | v1 | v1 | Multi-note evaluation (G3--G5, 9 pitches) |
+
+TPE-optimized variants are also included for benchmarking comparison against the CMA-ES defaults (see `instruments/*-tpe/` directories).
+
 ## Supported formats
 
 - **GoatTracker** — `.ins` files loadable in GoatTracker 2.x (Cadaver).
@@ -68,35 +78,21 @@ scalar distance is the **fitness score**.
 
 ### What it measures
 
-The fitness score is the weighted sum of eight component distances between
-the reference sample and the SID render:
-
-| Component | Distance metric | Default weight |
-|---|---|---:|
-| `envelope` | L2 between normalized amplitude envelopes (128 frames) | 1.0 |
-| `harmonics` | Cosine distance of the first 16 partial magnitudes | 1.0 |
-| `spectral_centroid` | L1 between log-centroid time series (scaled by 4 octaves) | 0.5 |
-| `spectral_rolloff` | L1 between log-rolloff time series (scaled by 4 octaves) | 0.25 |
-| `spectral_flatness` | L1 between flatness time series | 0.25 |
-| `noisiness` | Squared error of scalar noisiness | 0.5 |
-| `fundamental` | Squared log2-ratio of f0 estimates | 2.0 |
-| `adsr` | L1 over (attack, decay, sustain, release) / 4 | 1.5 |
-
-All components are non-negative and normalized to be O(1), so the default
-weights are directly interpretable. The function is symmetric and
-`distance(x, x) == 0`.
+The fitness function combines multi-scale log-mel MSE (the primary
+timbral measure) with envelope derivative matching, harmonic magnitudes,
+fundamental frequency, and ADSR shape. All components are non-negative
+and normalized to be O(1), so the default weights are directly
+interpretable. The function is symmetric and `distance(x, x) == 0`.
 
 ### How to interpret it
 
 - **0** = identical features (perfect match)
 - **Lower is better**
-- **Typical range for SID instruments: 0.2 -- 0.6.** The SID chip's
+- **Typical range for SID instruments: 0.4 -- 1.0.** The SID chip's
   limited waveforms and coarse ADSR mean even well-optimized patches
-  usually land above 0.2.
-- Delivered scores: acoustic-guitar **0.2944** (6581) / **0.2867** (8580)
-  (v3 pipeline).  Grand piano **0.4194** (6581) / **0.4621** (8580)
-  (v4 pipeline, multi-note chromatic evaluation across C3--C5, 9 pitches;
-  see `instruments/grand-piano/README.md`).
+  usually land above 0.4.
+- Delivered scores (v5 pipeline, CMA-ES): grand piano **0.4721** (8580),
+  acoustic guitar **0.5504** (8580), violin **0.9138** (6581).
 
 Each instrument folder records its fitness score in both `params.json`
 (field `fitness_score`) and `raw.asm` (comment `; @meta fitness_score=...`).
@@ -166,6 +162,10 @@ actually build them:
 - **Parallel top-K CMA-ES** -- Phase 2 refinement combos can run
   concurrently via `--parallel-chips`.  See `tools/sidmatch/README.md`
   for benchmarks and guidance on when this helps.
+
+- **Optuna TPE alternative** -- pass `--optimizer tpe` to use
+  Optuna's Tree-structured Parzen Estimator instead of CMA-ES.
+  See `tools/sidmatch/README.md` for benchmark comparisons.
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.
