@@ -10,11 +10,12 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 import numpy as np
-import librosa
+from scipy.signal import resample_poly
+from math import gcd
 
 
 # Canonical analysis parameters.
-CANONICAL_SR = 44100
+CANONICAL_SR = 22050
 HOP_MS = 10.0  # ~10 ms hop for envelope / spectral time series
 N_FFT = 2048
 N_HARMONICS = 16
@@ -54,6 +55,7 @@ class FeatureVec:
     spectral_flatness: np.ndarray
     fundamental_hz: float
     noisiness: float
+    log_mel: Optional[tuple] = None  # tuple of 2D arrays (n_mels × n_frames), one per scale
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -142,6 +144,206 @@ def _detect_adsr(env: np.ndarray, hop_s: float) -> tuple:
     return float(attack_s), float(decay_s), float(sustain_level), float(release_s)
 
 
+# ---------------------------------------------------------------------------
+# Pure numpy/scipy replacements for librosa hot-path functions
+# ---------------------------------------------------------------------------
+
+def _resample_audio(y: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample audio using scipy.signal.resample_poly (integer-ratio)."""
+    if orig_sr == target_sr:
+        return y
+    g = gcd(int(orig_sr), int(target_sr))
+    up = target_sr // g
+    down = orig_sr // g
+    return resample_poly(y, up, down).astype(np.float32)
+
+
+def _stft_mag(y: np.ndarray, n_fft: int, hop_length: int) -> np.ndarray:
+    """Compute magnitude STFT using numpy (matching librosa's center-pad convention).
+
+    Returns shape (1 + n_fft//2, n_frames).
+    """
+    # Center-pad the signal (librosa default).
+    pad_len = n_fft // 2
+    y_padded = np.pad(y, (pad_len, pad_len), mode='reflect')
+
+    # Hann window
+    window = np.hanning(n_fft + 1)[:n_fft].astype(np.float32)
+
+    n_frames = 1 + (len(y_padded) - n_fft) // hop_length
+    if n_frames <= 0:
+        return np.zeros((1 + n_fft // 2, 0), dtype=np.float32)
+
+    # Build frame matrix and apply window + FFT
+    indices = np.arange(n_fft)[None, :] + (np.arange(n_frames) * hop_length)[:, None]
+    frames = y_padded[indices] * window[None, :]
+    S = np.abs(np.fft.rfft(frames, n=n_fft, axis=1)).T  # (freq_bins, n_frames)
+    return S.astype(np.float32)
+
+
+def _fft_frequencies(sr: int, n_fft: int) -> np.ndarray:
+    """Equivalent to librosa.fft_frequencies."""
+    return np.fft.rfftfreq(n_fft, d=1.0 / sr)
+
+
+def _rms_from_stft(S: np.ndarray) -> np.ndarray:
+    """RMS per frame from magnitude STFT. Returns shape (n_frames,)."""
+    return np.sqrt(np.mean(S ** 2, axis=0))
+
+
+def _rms_frames(y: np.ndarray, frame_length: int, hop_length: int) -> np.ndarray:
+    """Compute RMS per frame directly from audio (no STFT needed)."""
+    # Center-pad like librosa
+    pad_len = frame_length // 2
+    y_padded = np.pad(y, (pad_len, pad_len), mode='reflect')
+
+    n_frames = 1 + (len(y_padded) - frame_length) // hop_length
+    if n_frames <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    indices = np.arange(frame_length)[None, :] + (np.arange(n_frames) * hop_length)[:, None]
+    frames = y_padded[indices]
+    return np.sqrt(np.mean(frames ** 2, axis=1)).astype(np.float32)
+
+
+def _spectral_centroid(S: np.ndarray, freqs: np.ndarray) -> np.ndarray:
+    """Spectral centroid per frame. Returns shape (n_frames,)."""
+    S_sum = S.sum(axis=0)
+    S_sum = np.where(S_sum == 0, 1.0, S_sum)  # avoid division by zero
+    return (freqs[:, None] * S).sum(axis=0) / S_sum
+
+
+def _spectral_rolloff(S: np.ndarray, freqs: np.ndarray, roll_percent: float = 0.85) -> np.ndarray:
+    """Spectral rolloff per frame. Returns shape (n_frames,)."""
+    cumsum = np.cumsum(S, axis=0)
+    total = cumsum[-1:, :]  # shape (1, n_frames)
+    threshold = roll_percent * total
+    # For each frame, find first freq bin where cumsum >= threshold
+    n_frames = S.shape[1]
+    rolloff = np.zeros(n_frames, dtype=np.float64)
+    for i in range(n_frames):
+        if total[0, i] <= 0:
+            rolloff[i] = 0.0
+            continue
+        above = np.where(cumsum[:, i] >= threshold[0, i])[0]
+        if above.size:
+            rolloff[i] = freqs[above[0]]
+        else:
+            rolloff[i] = freqs[-1]
+    return rolloff
+
+
+def _spectral_flatness(S: np.ndarray) -> np.ndarray:
+    """Spectral flatness per frame. Returns shape (n_frames,)."""
+    eps = 1e-10
+    S_pos = np.maximum(S, eps)
+    geo_mean = np.exp(np.mean(np.log(S_pos), axis=0))
+    arith_mean = np.mean(S_pos, axis=0)
+    return (geo_mean / arith_mean).astype(np.float64)
+
+
+def _trim_silence(y: np.ndarray, top_db: float = 60.0, frame_length: int = 2048, hop_length: int = 512) -> np.ndarray:
+    """Trim leading/trailing silence based on RMS threshold.
+
+    Equivalent to librosa.effects.trim but uses numpy directly.
+    Returns trimmed audio (no index tuple).
+    """
+    if y.size == 0:
+        return y
+
+    rms = _rms_frames(y, frame_length, hop_length)
+    if rms.size == 0 or rms.max() <= 0:
+        return y
+
+    # Convert top_db threshold to linear
+    rms_max = rms.max()
+    threshold = rms_max * 10.0 ** (-top_db / 20.0)
+
+    above = np.where(rms >= threshold)[0]
+    if above.size == 0:
+        return y
+
+    first_frame = int(above[0])
+    last_frame = int(above[-1])
+
+    start_sample = first_frame * hop_length
+    # End sample: last active frame center + half frame
+    end_sample = min(y.size, last_frame * hop_length + frame_length)
+
+    trimmed = y[start_sample:end_sample]
+    return trimmed if trimmed.size > 0 else y
+
+
+# ---------------------------------------------------------------------------
+# Mel filterbank and multi-scale log-mel spectrogram
+# ---------------------------------------------------------------------------
+
+def _hz_to_mel(f: np.ndarray) -> np.ndarray:
+    return 2595.0 * np.log10(1.0 + f / 700.0)
+
+
+def _mel_to_hz(m: np.ndarray) -> np.ndarray:
+    return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+
+
+def _mel_filterbank(sr: int, n_fft: int, n_mels: int = 64) -> np.ndarray:
+    """Create a mel filterbank matrix of shape (n_mels, 1 + n_fft // 2)."""
+    n_freqs = 1 + n_fft // 2
+    fmin = 0.0
+    fmax = sr / 2.0
+
+    # Mel-spaced center frequencies
+    mel_min = _hz_to_mel(np.array(fmin))
+    mel_max = _hz_to_mel(np.array(fmax))
+    mel_points = np.linspace(float(mel_min), float(mel_max), n_mels + 2)
+    hz_points = _mel_to_hz(mel_points)
+
+    # FFT bin frequencies
+    fft_freqs = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+
+    filterbank = np.zeros((n_mels, n_freqs), dtype=np.float32)
+    for i in range(n_mels):
+        lo, center, hi = hz_points[i], hz_points[i + 1], hz_points[i + 2]
+        # Rising slope
+        if center > lo:
+            up = (fft_freqs - lo) / (center - lo)
+        else:
+            up = np.zeros_like(fft_freqs)
+        # Falling slope
+        if hi > center:
+            down = (hi - fft_freqs) / (hi - center)
+        else:
+            down = np.zeros_like(fft_freqs)
+        filterbank[i] = np.maximum(0.0, np.minimum(up, down))
+
+    return filterbank
+
+
+def _compute_log_mel_specs(y: np.ndarray, sr: int, n_mels: int = 64) -> tuple:
+    """Compute multi-scale log-mel spectrograms (FFT 512 and 2048).
+
+    Returns a tuple of two 2-D arrays, each of shape (n_mels, n_frames).
+    """
+    scales = [
+        (512, 256),    # (n_fft, hop_length)
+        (2048, 512),
+    ]
+    results = []
+    for n_fft, hop in scales:
+        S = _stft_mag(y, n_fft=n_fft, hop_length=hop)
+        fb = _mel_filterbank(sr, n_fft, n_mels)
+        mel_spec = fb @ S  # (n_mels, n_frames)
+        # Use log compression with a floor to avoid extreme values in
+        # quiet bands that amplify rendering jitter.
+        log_mel = np.log(np.maximum(mel_spec, 1e-4) + 1e-7)
+        results.append(log_mel.astype(np.float32))
+    return tuple(results)
+
+
+# ---------------------------------------------------------------------------
+# harmonic magnitudes (kept mostly as-is, but uses _fft_frequencies)
+# ---------------------------------------------------------------------------
+
 def _harmonic_magnitudes(
     y: np.ndarray, sr: int, f0: float, n_harmonics: int = N_HARMONICS,
     S: Optional[np.ndarray] = None,
@@ -156,7 +358,7 @@ def _harmonic_magnitudes(
         return np.zeros(n_harmonics, dtype=np.float64)
 
     if S is None:
-        S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=_hop_length(sr)))
+        S = _stft_mag(y, n_fft=N_FFT, hop_length=_hop_length(sr))
     if S.size == 0:
         return np.zeros(n_harmonics, dtype=np.float64)
 
@@ -169,7 +371,7 @@ def _harmonic_magnitudes(
         keep = slice(None)
     mean_mag = S[:, keep].mean(axis=1)
 
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=N_FFT)
+    freqs = _fft_frequencies(sr=sr, n_fft=N_FFT)
     nyq = sr / 2.0
     out = np.zeros(n_harmonics, dtype=np.float64)
     # Tolerance for bin picking: half a semitone around each partial.
@@ -199,10 +401,11 @@ def _hop_length(sr: int) -> int:
 
 
 def _estimate_f0(y: np.ndarray, sr: int) -> float:
-    """Median f0 over voiced frames using YIN."""
+    """Median f0 over voiced frames using YIN (librosa fallback)."""
     if y.size < 2048:
         return 0.0
     try:
+        import librosa
         f0 = librosa.yin(
             y,
             fmin=50.0,
@@ -234,7 +437,7 @@ def extract_lite(audio: np.ndarray, sr: int, known_f0: float) -> FeatureVec:
         raise ValueError("audio is empty")
 
     if sr != CANONICAL_SR:
-        y = librosa.resample(y, orig_sr=sr, target_sr=CANONICAL_SR)
+        y = _resample_audio(y, orig_sr=sr, target_sr=CANONICAL_SR)
     work_sr = CANONICAL_SR
 
     peak = float(np.max(np.abs(y))) if y.size else 0.0
@@ -255,14 +458,14 @@ def extract_lite(audio: np.ndarray, sr: int, known_f0: float) -> FeatureVec:
             noisiness=0.0,
         )
 
-    y_trim, _ = librosa.effects.trim(y, top_db=-SILENCE_DB)
+    y_trim = _trim_silence(y, top_db=-SILENCE_DB)
     if y_trim.size < 256:
         y_trim = y
     duration_s = float(y_trim.size / work_sr)
     hop = _hop_length(work_sr)
 
-    # Envelope
-    rms = librosa.feature.rms(y=y_trim, frame_length=N_FFT, hop_length=hop)[0]
+    # Envelope via direct RMS (no STFT needed)
+    rms = _rms_frames(y_trim, frame_length=N_FFT, hop_length=hop)
     rms_max = float(rms.max()) if rms.size else 0.0
     env_norm = rms / rms_max if rms_max > 0 else rms
     env_resampled = _resample_series(env_norm)
@@ -272,7 +475,7 @@ def extract_lite(audio: np.ndarray, sr: int, known_f0: float) -> FeatureVec:
     attack_s, decay_s, sustain_level, release_s = _detect_adsr(env_norm, hop_s)
 
     # Harmonics (single STFT)
-    S_mag = np.abs(librosa.stft(y_trim, n_fft=N_FFT, hop_length=hop))
+    S_mag = _stft_mag(y_trim, n_fft=N_FFT, hop_length=hop)
     harmonics = _harmonic_magnitudes(y_trim, work_sr, known_f0, S=S_mag)
 
     return FeatureVec(
@@ -316,7 +519,7 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
 
     # Resample to canonical rate.
     if sr != CANONICAL_SR:
-        y = librosa.resample(y, orig_sr=sr, target_sr=CANONICAL_SR)
+        y = _resample_audio(y, orig_sr=sr, target_sr=CANONICAL_SR)
     work_sr = CANONICAL_SR
 
     # Handle all-zero / silent input: return a zeroed FeatureVec.
@@ -336,10 +539,11 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
             spectral_flatness=np.zeros(TIME_SERIES_FRAMES, dtype=np.float64),
             fundamental_hz=0.0,
             noisiness=0.0,
+            log_mel=None,
         )
 
     # Trim silence.
-    y_trim, _ = librosa.effects.trim(y, top_db=-SILENCE_DB)
+    y_trim = _trim_silence(y, top_db=-SILENCE_DB)
     if y_trim.size < 256:
         y_trim = y  # too short to trim; keep original
     duration_s = float(y_trim.size / work_sr)
@@ -347,7 +551,7 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
     hop = _hop_length(work_sr)
 
     # Amplitude envelope (RMS per hop), normalized.
-    rms = librosa.feature.rms(y=y_trim, frame_length=N_FFT, hop_length=hop)[0]
+    rms = _rms_frames(y_trim, frame_length=N_FFT, hop_length=hop)
     rms_max = float(rms.max()) if rms.size else 0.0
     env_norm = rms / rms_max if rms_max > 0 else rms
     env_resampled = _resample_series(env_norm)
@@ -357,16 +561,11 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
     attack_s, decay_s, sustain_level, release_s = _detect_adsr(env_norm, hop_s)
 
     # Spectral features.
-    S_mag = np.abs(librosa.stft(y_trim, n_fft=N_FFT, hop_length=hop))
-    centroid = librosa.feature.spectral_centroid(
-        S=S_mag, sr=work_sr, n_fft=N_FFT, hop_length=hop
-    )[0]
-    rolloff = librosa.feature.spectral_rolloff(
-        S=S_mag, sr=work_sr, n_fft=N_FFT, hop_length=hop, roll_percent=0.85
-    )[0]
-    flatness = librosa.feature.spectral_flatness(
-        S=S_mag, n_fft=N_FFT, hop_length=hop
-    )[0]
+    S_mag = _stft_mag(y_trim, n_fft=N_FFT, hop_length=hop)
+    freqs = _fft_frequencies(sr=work_sr, n_fft=N_FFT)
+    centroid = _spectral_centroid(S_mag, freqs)
+    rolloff = _spectral_rolloff(S_mag, freqs, roll_percent=0.85)
+    flatness = _spectral_flatness(S_mag)
 
     # Fundamental estimation.
     f0 = known_f0 if known_f0 is not None else _estimate_f0(y_trim, work_sr)
@@ -392,6 +591,9 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
     # Noisiness: mean spectral flatness over the sustain region.
     noisiness = float(np.mean(flatness)) if flatness.size else 0.0
 
+    # Multi-scale log-mel spectrograms.
+    log_mel = _compute_log_mel_specs(y_trim, work_sr)
+
     return FeatureVec(
         sr=work_sr,
         duration_s=duration_s,
@@ -406,4 +608,5 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
         spectral_flatness=_resample_series(flatness),
         fundamental_hz=float(f0),
         noisiness=noisiness,
+        log_mel=log_mel,
     )

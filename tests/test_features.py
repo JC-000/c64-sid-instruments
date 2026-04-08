@@ -70,7 +70,7 @@ def test_different_sample_rates():
         sig = _exp_decay_sine(440.0, sr=sr)
         fv = extract(sig, sr)
         assert abs(fv.fundamental_hz - 440.0) < 3.0
-        assert fv.sr == 44100
+        assert fv.sr == 22050
 
 
 def test_all_zero_audio():
