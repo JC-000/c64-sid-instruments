@@ -1,14 +1,25 @@
 # Violin (SID Instrument)
 
-A SID chip instrument patch: violin.
+A SID chip approximation of a bowed violin, optimized via the v5
+tracker-style pipeline with multi-note chromatic evaluation across
+G3--G5 (9 pitches).
+
+**Source**: University of Iowa Musical Instrument Samples (public domain).
+Anechoic chamber recordings, 24-bit/44.1kHz stereo, by Lawrence Fritts.
 
 ## Chip Variants
 
 | | 6581 | 8580 |
 |---|---|---|
 | **Status** | available | available |
-| **Fitness** | 0.0000 | 0.0000 |
+| **Fitness** | 0.9138 | -- |
 | **Version** | 1 | 1 |
+
+Both variants use a saw-based sustain waveform with a pulse+saw attack
+transient and test-bit oscillator reset. The 6581 variant uses a longer
+attack phase (5 frames) and steeper PW sweep; the 8580 variant uses a
+slower attack (A=8) with high sustain level (S=15) and multi-step
+wavetable sequencing.
 
 ### 6581 Parameters
 
@@ -64,7 +75,7 @@ A SID chip instrument patch: violin.
 
 ## Tags
 
-`violin`
+`violin`, `strings`, `bowed`
 
 ## Files
 

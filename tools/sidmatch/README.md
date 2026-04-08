@@ -16,6 +16,7 @@ for a patch that matches it as closely as the hardware allows.
   `-sounddev wav` to capture audio
 - `features.py` — `extract(audio, sr) -> FeatureVec`
 - `fitness.py` — `distance(ref, cand, weights=None) -> float`
+- `surrogate.py` — MLP surrogate model for pre-screening candidates
 - `cli.py` — command-line interface (`match`, `export` subcommands)
 
 ---
@@ -140,7 +141,10 @@ x64sc -console -pal +autostart-warp +binarymonitor +remotemonitor \
 ## Feature extraction
 
 All time-series features are resampled to **128 frames** (`features.TIME_SERIES_FRAMES`).
-Audio is resampled to **44.1 kHz** and silence is trimmed (−60 dB).
+Audio is resampled to **22050 Hz** (halved from 44100 to reduce
+computation) and silence is trimmed (-60 dB). Feature extraction uses
+scipy and numpy directly on the hot path (librosa removed from inner
+loop).
 
 | field | type | description |
 |---|---|---|
@@ -163,16 +167,18 @@ Raises `ValueError` on empty or non-finite input.
 
 ## Distance recipe
 
-`distance(ref, cand, weights=None)` — weighted sum of per-component distances:
+`distance(ref, cand, weights=None)` — weighted sum of per-component distances.
+
+The v5 pipeline replaced the spectral centroid/rolloff/flatness/noisiness
+components with a **multi-scale log-mel MSE** fitness function and added
+**envelope derivative matching**:
 
 | component | distance | default weight |
 |---|---|---|
+| `log_mel` | multi-scale log-mel spectrogram MSE (3 FFT sizes) | 1.0 |
 | `envelope` | L2 between amplitude envelopes | 1.0 |
+| `envelope_derivative` | L2 between envelope derivative curves | 0.5 |
 | `harmonics` | cosine distance of partial vectors | 2.0 |
-| `spectral_centroid` | L1 between log-centroid series (÷ 4 octaves) | 0.5 |
-| `spectral_rolloff` | L1 between log-rolloff series (÷ 4 octaves) | 0.25 |
-| `spectral_flatness` | L1 between flatness series | 0.25 |
-| `noisiness` | squared error of scalar noisiness | 0.5 |
 | `fundamental` | squared log2-ratio of f0 estimates | 2.0 |
 | `adsr` | L1 over (attack, decay, sustain, release) / 4 | 1.0 |
 
@@ -183,7 +189,8 @@ Override via `weights={"harmonics": 3.0, ...}`.
 
 ## Matching (fast grid search)
 
-The `match` subcommand uses a **two-phase grid search**:
+The `match` subcommand uses a **two-phase grid search** with several
+v5 pipeline improvements:
 
 1. **Fast screening** -- renders each discrete combo (sustain waveform x
    attack waveform x filter mode x test bit = ~42 combos) once with
@@ -191,6 +198,32 @@ The `match` subcommand uses a **two-phase grid search**:
 2. **Top-K refinement** -- the best K combos from phase 1 (default
    `--top-k 3`) are refined with full CMA-ES optimization using the
    given `--budget`.
+
+### v5 pipeline improvements
+
+- **Coarse-to-fine rendering** -- early evaluations render only 0.5s of
+  audio, upgrading to 1.0s and then full duration as the search
+  converges. Reduces per-eval cost in early stages.
+- **Conditional parameter trimming** -- based on the combo (e.g. filter
+  off, no pulse waveform), irrelevant continuous dimensions are frozen,
+  leaving 5--13 active dims instead of the full set.
+- **Successive halving for top-K** -- budget is reallocated from
+  poorly-performing combos to promising ones during Phase 2.
+- **Surrogate MLP pre-screening** -- after 500 evaluations, an MLP
+  trained on past evaluations pre-screens candidates and skips those
+  predicted to be poor. See `surrogate.py`.
+- **Warm-start CMA-ES** -- CMA-ES restarts use a tighter sigma around
+  the best-known solution for faster local convergence.
+- **Parameter reparameterization** -- pulse width is parameterized as
+  `pw_center`/`pw_width` instead of `pw_start`/`pw_delta`; filter cutoff
+  uses log scale; all continuous parameters are normalized to [0,1].
+- **Multi-step wavetable sequences** -- the search space includes 3--4
+  step waveform patterns (not just attack+sustain), enabling richer
+  timbral evolution per note.
+- **22050 Hz rendering** -- inner-loop renders use 22050 Hz sample rate
+  (halved from 44100), cutting render time roughly in half.
+- **scipy+numpy feature extraction** -- librosa removed from the hot
+  path; feature extraction uses scipy and numpy directly.
 
 By default, `match` runs for **both** the 6581 and 8580 chip models and
 writes results to `<work-dir>/6581/` and `<work-dir>/8580/` respectively:
@@ -235,6 +268,29 @@ subdirectory).
 | `--work-dir`    | required | output directory                                    |
 | `--chip-model`  | None    | `"6581"` or `"8580"` (default: run both)             |
 | `--parallel-chips` / `--no-parallel-chips` | off | Refine both chip models concurrently (opt-in; useful on high-core-count machines) |
+| `--optimizer`   | `cma`   | optimizer backend: `cma` (CMA-ES) or `tpe` (Optuna TPE) |
+
+### Optuna TPE alternative
+
+Pass `--optimizer tpe` to use Optuna's Tree-structured Parzen Estimator
+instead of CMA-ES. TPE is a Bayesian optimization method that builds
+density models over good and bad regions of parameter space. It requires
+`pip install optuna`.
+
+### Benchmark: CMA-ES vs TPE
+
+Results from single-chip optimization runs (budget=5000):
+
+| Instrument | Chip | CMA-ES Fitness | CMA-ES Time | TPE Fitness | TPE Time |
+|---|---|---|---|---|---|
+| Grand Piano | 8580 | 0.4721 | 70 min | 1.9050 | 259 min |
+| Acoustic Guitar | 8580 | 0.5504 | 122 min | 2.8345 | 252 min |
+| Violin | 6581 | 0.9138 | 49 min | 2.8142 | 275 min |
+
+CMA-ES consistently achieves lower fitness in less time. TPE may be
+useful for exploration or when CMA-ES gets stuck in local optima, but
+it is not recommended as the default. TPE instrument outputs are
+included in the repo under `instruments/*-tpe/` for comparison.
 
 ---
 
@@ -366,6 +422,9 @@ no quality regression in fitness scores.
 ```
 python3 -m pip install --user --break-system-packages \
     pyresidfp librosa numpy scipy soundfile cma pytest
+
+# Optional: for --optimizer tpe
+python3 -m pip install --user --break-system-packages optuna
 ```
 
 Tests:
