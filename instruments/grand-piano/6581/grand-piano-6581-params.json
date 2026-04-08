@@ -1,9 +1,9 @@
 {
   "waveform": "saw",
-  "attack": 0,
-  "decay": 0,
-  "sustain": 4,
-  "release": 10,
+  "attack": 10,
+  "decay": 3,
+  "sustain": 9,
+  "release": 12,
   "pulse_width": 2048,
   "pw_table": null,
   "filter_cutoff": 44,
@@ -13,14 +13,14 @@
   "ring_mod": false,
   "sync": false,
   "frequency": 440.0,
-  "gate_frames": 10,
-  "release_frames": 80,
+  "gate_frames": 33,
+  "release_frames": 155,
   "wavetable": null,
   "volume": 15,
   "chip_model": "6581",
-  "source_instrument": "Salamander Grand Piano (CC-BY 3.0)",
-  "wt_attack_frames": 5,
-  "wt_attack_waveform": null,
+  "source_instrument": null,
+  "wt_attack_frames": 2,
+  "wt_attack_waveform": "noise",
   "wt_sustain_waveform": "saw",
   "wt_use_test_bit": false,
   "pw_start": 2048,
@@ -71,5 +71,5 @@
     }
   ],
   "fitness_score": 0.0,
-  "version": 9
+  "version": 10
 }

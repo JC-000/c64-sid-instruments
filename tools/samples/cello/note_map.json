@@ -1,0 +1,42 @@
+{
+  "C2": {
+    "freq_hz": 65.41,
+    "file": "iowa-cello-C2-ff.wav"
+  },
+  "Eb2": {
+    "freq_hz": 77.78,
+    "file": "iowa-cello-Eb2-ff.wav"
+  },
+  "Gb2": {
+    "freq_hz": 92.5,
+    "file": "iowa-cello-Gb2-ff.wav"
+  },
+  "A2": {
+    "freq_hz": 110.0,
+    "file": "iowa-cello-A2-ff.wav"
+  },
+  "C3": {
+    "freq_hz": 130.81,
+    "file": "iowa-cello-C3-ff.wav"
+  },
+  "Eb3": {
+    "freq_hz": 155.56,
+    "file": "iowa-cello-Eb3-ff.wav"
+  },
+  "Gb3": {
+    "freq_hz": 185.0,
+    "file": "iowa-cello-Gb3-ff.wav"
+  },
+  "A3": {
+    "freq_hz": 220.0,
+    "file": "iowa-cello-A3-ff.wav"
+  },
+  "C4": {
+    "freq_hz": 261.63,
+    "file": "iowa-cello-C4-ff.wav"
+  },
+  "Eb4": {
+    "freq_hz": 311.13,
+    "file": "iowa-cello-Eb4-ff.wav"
+  }
+}

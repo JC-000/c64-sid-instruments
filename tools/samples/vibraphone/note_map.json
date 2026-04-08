@@ -1,0 +1,38 @@
+{
+  "C3": {
+    "freq_hz": 130.81,
+    "file": "iowa-vibraphone-C3-ff.wav"
+  },
+  "Eb3": {
+    "freq_hz": 155.56,
+    "file": "iowa-vibraphone-Eb3-ff.wav"
+  },
+  "Gb3": {
+    "freq_hz": 185.0,
+    "file": "iowa-vibraphone-Gb3-ff.wav"
+  },
+  "A3": {
+    "freq_hz": 220.0,
+    "file": "iowa-vibraphone-A3-ff.wav"
+  },
+  "C4": {
+    "freq_hz": 261.63,
+    "file": "iowa-vibraphone-C4-ff.wav"
+  },
+  "Eb4": {
+    "freq_hz": 311.13,
+    "file": "iowa-vibraphone-Eb4-ff.wav"
+  },
+  "Gb4": {
+    "freq_hz": 369.99,
+    "file": "iowa-vibraphone-Gb4-ff.wav"
+  },
+  "A4": {
+    "freq_hz": 440.0,
+    "file": "iowa-vibraphone-A4-ff.wav"
+  },
+  "C5": {
+    "freq_hz": 523.25,
+    "file": "iowa-vibraphone-C5-ff.wav"
+  }
+}
