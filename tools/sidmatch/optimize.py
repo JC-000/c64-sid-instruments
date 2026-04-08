@@ -821,7 +821,7 @@ class Optimizer:
         return self._run_cma()
 
     def _run_tpe(self) -> OptimizerResult:
-        """Optuna TPE optimization path."""
+        """Optuna TPE optimization path with parallel batch evaluation."""
         try:
             import optuna
         except ImportError:
@@ -862,20 +862,20 @@ class Optimizer:
         current_render_dur = self._render_duration_for_eval(0)
         current_ref_fv = self._ref_fv_for_duration(current_render_dur)
 
-        def objective(trial):
-            nonlocal evaluations, best_fitness, best_x_full, non_improve
-            nonlocal converged, current_render_dur, current_ref_fv
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, self.budget // 2),
+                multivariate=True,
+                group=True,
+                constant_liar=True,
+                n_ei_candidates=256,
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
 
-            # Check if render duration tier has changed.
-            new_render_dur = self._render_duration_for_eval(evaluations)
-            if new_render_dur != current_render_dur:
-                current_render_dur = new_render_dur
-                current_ref_fv = self._ref_fv_for_duration(current_render_dur)
-                best_fitness = float("inf")
-                non_improve = 0
-
-            # Sample each active param — use suggest_int for discrete
-            # params, suggest_float (normalized) for continuous ones.
+        def _trial_to_x_full(trial):
+            """Sample params from an Optuna trial and return the full vector."""
             x_red = np.empty(n_active, dtype=np.float64)
             for i, orig_i in enumerate(act_idx):
                 name = _PARAM_NAMES[orig_i]
@@ -888,57 +888,104 @@ class Optimizer:
                     norm = trial.suggest_float(name, 0.0, 1.0)
                     x_red[i] = norm * range_red_safe[i] + lo_red[i]
             x_full = _expand_vector(x_red, act_idx, bounds_high)
-            # Inject frozen values.
             for fidx, fval in self.freeze_indices.items():
                 x_full[fidx] = fval
+            return x_full
 
-            fitness = _eval_single(
-                x_full, self.fixed_kwargs, current_ref_fv,
-                self.weights, best_fitness=best_fitness,
-                render_dur_s=current_render_dur,
+        n_workers = self.n_workers
+
+        # Build multiprocessing pool for parallel evaluation.
+        pool = None
+        best_fitness_shared = None
+        ref_fv_dict = _fv_to_dict(current_ref_fv)
+        if n_workers > 1:
+            best_fitness_shared = mp.Value('d', float('inf'))
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=n_workers,
+                initializer=_worker_init,
+                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                          best_fitness_shared, current_render_dur),
             )
 
-            evaluations += 1
-            if fitness < best_fitness - 1e-9:
-                best_fitness = fitness
-                best_x_full = x_full.copy()
-                non_improve = 0
-            else:
-                non_improve += 1
-            history.append(best_fitness)
+        try:
+            while evaluations < self.budget and non_improve < self.patience:
+                # Check if render duration tier has changed.
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    ref_fv_dict = _fv_to_dict(current_ref_fv)
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = float("inf")
+                    # Re-create pool with updated ref features and render dur.
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=n_workers,
+                            initializer=_worker_init,
+                            initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                                      best_fitness_shared, current_render_dur),
+                        )
 
-            # Checkpoint every ~100 evals.
-            if self.work_dir is not None and evaluations % 100 == 0:
-                self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+                # Ask Optuna for a batch of trials.
+                batch_size = min(n_workers, self.budget - evaluations)
+                trials = [study.ask() for _ in range(batch_size)]
 
-            # Log progress.
-            if self.log_interval > 0 and evaluations % self.log_interval == 0:
-                elapsed = time.time() - t0
-                print(
-                    f"[optim-tpe] evals={evaluations}/{self.budget} "
-                    f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
-                    flush=True,
-                )
+                # Build full parameter vectors for each trial.
+                candidates_full = [_trial_to_x_full(t) for t in trials]
+                candidates_list = [list(c) for c in candidates_full]
 
-            # Patience stop via pruning.
-            if non_improve >= self.patience:
-                converged = True
-                study.stop()
+                # Evaluate in parallel or sequentially.
+                if pool is not None:
+                    fitnesses = pool.map(_worker_eval, candidates_list)
+                else:
+                    fitnesses = [
+                        _eval_single(
+                            np.asarray(c), self.fixed_kwargs, current_ref_fv,
+                            self.weights, best_fitness=best_fitness,
+                            render_dur_s=current_render_dur,
+                        )
+                        for c in candidates_list
+                    ]
 
-            return fitness
+                # Tell Optuna the results and update tracking.
+                for trial, fitness, x_full in zip(trials, fitnesses, candidates_full):
+                    study.tell(trial, fitness)
+                    evaluations += 1
+                    if fitness < best_fitness - 1e-9:
+                        best_fitness = fitness
+                        best_x_full = x_full.copy()
+                        non_improve = 0
+                        if best_fitness_shared is not None:
+                            best_fitness_shared.value = best_fitness
+                    else:
+                        non_improve += 1
+                    history.append(best_fitness)
 
-        study = optuna.create_study(
-            sampler=optuna.samplers.TPESampler(
-                n_startup_trials=min(50, self.budget // 2),
-                multivariate=True,
-                group=True,
-                constant_liar=True,
-                n_ei_candidates=256,
-                seed=self.seed if self.seed != 0 else None,
-            ),
-            direction="minimize",
-        )
-        study.optimize(objective, n_trials=self.budget, n_jobs=1)
+                # Checkpoint every ~100 evals.
+                if self.work_dir is not None and evaluations % 100 < batch_size:
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                # Log progress.
+                if self.log_interval > 0 and evaluations % self.log_interval < batch_size:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-tpe] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if non_improve >= self.patience:
+                    converged = True
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         # Final checkpoint.
         self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
@@ -1035,6 +1082,58 @@ class Optimizer:
                         f"{n_active + len(freeze_positions)} -> {n_active}",
                         flush=True,
                     )
+
+        # --- Low-dimensional fallbacks (CMA-ES needs >= 2 dims) ---
+        if n_active == 0:
+            # All params frozen -- evaluate the single point and return.
+            current_render_dur = self._render_duration_for_eval(0)
+            current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+            fitness = _eval_single(
+                x0_full, self.fixed_kwargs, current_ref_fv,
+                self.weights, render_dur_s=current_render_dur,
+            )
+            wall = time.time() - t0
+            best_params = decode_params(x0_full, self.fixed_kwargs)
+            return OptimizerResult(
+                best_params=best_params,
+                best_fitness=fitness,
+                history=[fitness],
+                evaluations=1,
+                wall_time_s=wall,
+                converged=True,
+            )
+
+        if n_active == 1:
+            # 1-D grid search fallback (CMA-ES requires >= 2 dimensions).
+            n_grid = 50
+            current_render_dur = self._render_duration_for_eval(0)
+            current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+            best_fitness = float("inf")
+            best_x_full_grid: np.ndarray = x0_full.copy()
+            for val in np.linspace(0.0, 1.0, n_grid):
+                x_red = _denormalize(np.array([val]))
+                x_full = _expand_vector(x_red, act_idx, bounds_high)
+                if frozen_values:
+                    for fidx, fval in frozen_values.items():
+                        x_full[fidx] = fval
+                fitness = _eval_single(
+                    x_full, self.fixed_kwargs, current_ref_fv,
+                    self.weights, best_fitness=best_fitness,
+                    render_dur_s=current_render_dur,
+                )
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_x_full_grid = x_full.copy()
+            wall = time.time() - t0
+            best_params = decode_params(best_x_full_grid, self.fixed_kwargs)
+            return OptimizerResult(
+                best_params=best_params,
+                best_fitness=best_fitness,
+                history=[best_fitness],
+                evaluations=n_grid,
+                wall_time_s=wall,
+                converged=True,
+            )
 
         # sigma0 in normalized [0,1] space: ~1/6 of range normally, ~1/10 for warm-start.
         sigma0 = 0.10 if self.warm_start else 0.17
@@ -1551,7 +1650,7 @@ class MultiNoteOptimizer:
         return self._run_cma()
 
     def _run_tpe(self) -> OptimizerResult:
-        """Optuna TPE optimization path for multi-note."""
+        """Optuna TPE optimization path for multi-note with parallel batch evaluation."""
         try:
             import optuna
         except ImportError:
@@ -1592,18 +1691,20 @@ class MultiNoteOptimizer:
         current_render_dur = self._render_duration_for_eval(0)
         chip_model = self.fixed_kwargs.get("chip_model")
 
-        def objective(trial):
-            nonlocal evaluations, best_fitness, best_x_full, non_improve
-            nonlocal converged, current_render_dur
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, self.budget // 2),
+                multivariate=True,
+                group=True,
+                constant_liar=True,
+                n_ei_candidates=256,
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
 
-            new_render_dur = self._render_duration_for_eval(evaluations)
-            if new_render_dur != current_render_dur:
-                current_render_dur = new_render_dur
-                best_fitness = float("inf")
-                non_improve = 0
-
-            # Sample each active param — use suggest_int for discrete
-            # params, suggest_float (normalized) for continuous ones.
+        def _trial_to_x_full(trial):
+            """Sample params from an Optuna trial and return the full vector."""
             x_red = np.empty(n_active, dtype=np.float64)
             for i, orig_i in enumerate(act_idx):
                 name = _PARAM_NAMES[orig_i]
@@ -1616,60 +1717,102 @@ class MultiNoteOptimizer:
                     norm = trial.suggest_float(name, 0.0, 1.0)
                     x_red[i] = norm * range_red_safe[i] + lo_red[i]
             x_full = _expand_vector(x_red, act_idx, bounds_high)
-            # Inject frozen values.
             for fidx, fval in self.freeze_indices.items():
                 x_full[fidx] = fval
+            return x_full
 
-            params = decode_params(x_full, self.fixed_kwargs)
-            try:
-                fitness = float(multi_note_fitness(
-                    params, self.ref_set,
-                    weights=self.weights,
-                    alpha=self.alpha,
-                    chip_model=chip_model,
-                    render_duration_s=current_render_dur,
-                ))
-            except Exception:
-                fitness = 1e6
+        n_workers = self.n_workers
 
-            evaluations += 1
-            if fitness < best_fitness - 1e-9:
-                best_fitness = fitness
-                best_x_full = x_full.copy()
-                non_improve = 0
-            else:
-                non_improve += 1
-            history.append(best_fitness)
+        # Build multiprocessing pool for parallel evaluation.
+        pool = None
+        ref_set_data = _ref_set_to_data(self.ref_set)
+        if n_workers > 1:
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=n_workers,
+                initializer=_mn_worker_init,
+                initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                          self.alpha, current_render_dur),
+            )
 
-            if self.work_dir is not None and evaluations % 100 == 0:
-                self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+        try:
+            while evaluations < self.budget and non_improve < self.patience:
+                # Check if render duration tier has changed.
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    # Re-create pool with updated render dur.
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=n_workers,
+                            initializer=_mn_worker_init,
+                            initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                                      self.alpha, current_render_dur),
+                        )
 
-            if self.log_interval > 0 and evaluations % self.log_interval == 0:
-                elapsed = time.time() - t0
-                print(
-                    f"[optim-mn-tpe] evals={evaluations}/{self.budget} "
-                    f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
-                    flush=True,
-                )
+                # Ask Optuna for a batch of trials.
+                batch_size = min(n_workers, self.budget - evaluations)
+                trials = [study.ask() for _ in range(batch_size)]
 
-            if non_improve >= self.patience:
-                converged = True
-                study.stop()
+                # Build full parameter vectors for each trial.
+                candidates_full = [_trial_to_x_full(t) for t in trials]
+                candidates_list = [list(c) for c in candidates_full]
 
-            return fitness
+                # Evaluate in parallel or sequentially.
+                if pool is not None:
+                    fitnesses = pool.map(_mn_worker_eval, candidates_list)
+                else:
+                    fitnesses = []
+                    for c in candidates_list:
+                        params = decode_params(np.asarray(c), self.fixed_kwargs)
+                        try:
+                            f = float(multi_note_fitness(
+                                params, self.ref_set,
+                                weights=self.weights,
+                                alpha=self.alpha,
+                                chip_model=chip_model,
+                                render_duration_s=current_render_dur,
+                            ))
+                        except Exception:
+                            f = 1e6
+                        fitnesses.append(f)
 
-        study = optuna.create_study(
-            sampler=optuna.samplers.TPESampler(
-                n_startup_trials=min(50, self.budget // 2),
-                multivariate=True,
-                group=True,
-                constant_liar=True,
-                n_ei_candidates=256,
-                seed=self.seed if self.seed != 0 else None,
-            ),
-            direction="minimize",
-        )
-        study.optimize(objective, n_trials=self.budget, n_jobs=1)
+                # Tell Optuna the results and update tracking.
+                for trial, fitness, x_full in zip(trials, fitnesses, candidates_full):
+                    study.tell(trial, fitness)
+                    evaluations += 1
+                    if fitness < best_fitness - 1e-9:
+                        best_fitness = fitness
+                        best_x_full = x_full.copy()
+                        non_improve = 0
+                    else:
+                        non_improve += 1
+                    history.append(best_fitness)
+
+                # Checkpoint every ~100 evals.
+                if self.work_dir is not None and evaluations % 100 < batch_size:
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                # Log progress.
+                if self.log_interval > 0 and evaluations % self.log_interval < batch_size:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-mn-tpe] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if non_improve >= self.patience:
+                    converged = True
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
 
@@ -1757,6 +1900,70 @@ class MultiNoteOptimizer:
                         f"{n_active + len(freeze_positions)} -> {n_active}",
                         flush=True,
                     )
+
+        # --- Low-dimensional fallbacks (CMA-ES needs >= 2 dims) ---
+        if n_active == 0:
+            # All params frozen -- evaluate the single point and return.
+            current_render_dur = self._render_duration_for_eval(0)
+            chip_model = self.fixed_kwargs.get("chip_model")
+            x_params = decode_params(x0_full, self.fixed_kwargs)
+            try:
+                fitness = float(multi_note_fitness(
+                    x_params, self.ref_set,
+                    weights=self.weights,
+                    alpha=self.alpha,
+                    chip_model=chip_model,
+                    render_duration_s=current_render_dur,
+                ))
+            except Exception:
+                fitness = 1e6
+            wall = time.time() - t0
+            return OptimizerResult(
+                best_params=x_params,
+                best_fitness=fitness,
+                history=[fitness],
+                evaluations=1,
+                wall_time_s=wall,
+                converged=True,
+            )
+
+        if n_active == 1:
+            # 1-D grid search fallback (CMA-ES requires >= 2 dimensions).
+            n_grid = 50
+            current_render_dur = self._render_duration_for_eval(0)
+            chip_model = self.fixed_kwargs.get("chip_model")
+            best_fitness = float("inf")
+            best_x_full_grid: np.ndarray = x0_full.copy()
+            for val in np.linspace(0.0, 1.0, n_grid):
+                x_red = _denormalize(np.array([val]))
+                x_full = _expand_vector(x_red, act_idx, bounds_high)
+                if frozen_values:
+                    for fidx, fval in frozen_values.items():
+                        x_full[fidx] = fval
+                x_params = decode_params(x_full, self.fixed_kwargs)
+                try:
+                    fitness = float(multi_note_fitness(
+                        x_params, self.ref_set,
+                        weights=self.weights,
+                        alpha=self.alpha,
+                        chip_model=chip_model,
+                        render_duration_s=current_render_dur,
+                    ))
+                except Exception:
+                    fitness = 1e6
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_x_full_grid = x_full.copy()
+            wall = time.time() - t0
+            best_params = decode_params(best_x_full_grid, self.fixed_kwargs)
+            return OptimizerResult(
+                best_params=best_params,
+                best_fitness=best_fitness,
+                history=[best_fitness],
+                evaluations=n_grid,
+                wall_time_s=wall,
+                converged=True,
+            )
 
         sigma0 = 0.10 if self.warm_start else 0.17
 

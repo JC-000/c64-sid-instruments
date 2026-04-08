@@ -1,8 +1,8 @@
 {
   "waveform": "saw",
-  "attack": 10,
-  "decay": 3,
-  "sustain": 9,
+  "attack": 0,
+  "decay": 0,
+  "sustain": 14,
   "release": 12,
   "pulse_width": 2048,
   "pw_table": null,
@@ -13,14 +13,14 @@
   "ring_mod": false,
   "sync": false,
   "frequency": 440.0,
-  "gate_frames": 33,
+  "gate_frames": 10,
   "release_frames": 155,
   "wavetable": null,
   "volume": 15,
   "chip_model": "6581",
   "source_instrument": null,
   "wt_attack_frames": 2,
-  "wt_attack_waveform": "noise",
+  "wt_attack_waveform": null,
   "wt_sustain_waveform": "saw",
   "wt_use_test_bit": false,
   "pw_start": 2048,
@@ -70,6 +70,6 @@
       "freq_hz": 523.25
     }
   ],
-  "fitness_score": 0.0,
-  "version": 10
+  "fitness_score": 0.431,
+  "version": 12
 }

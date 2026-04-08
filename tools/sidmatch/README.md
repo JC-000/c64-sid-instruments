@@ -277,6 +277,14 @@ instead of CMA-ES. TPE is a Bayesian optimization method that builds
 density models over good and bad regions of parameter space. It requires
 `pip install optuna`.
 
+TPE now uses **batch ask/tell with a multiprocessing pool**, matching
+the parallelism strategy used by CMA-ES. Each generation asks for a
+batch of trials, evaluates them in parallel across workers, and tells
+the results back. This eliminates the serial bottleneck that made early
+TPE benchmarks significantly slower than CMA-ES. TPE also handles
+1-dimensional search spaces where CMA-ES crashes (covariance matrix
+requires >= 2 dimensions).
+
 ### Benchmark: CMA-ES vs TPE
 
 Results from single-chip optimization runs (budget=5000):
@@ -287,10 +295,18 @@ Results from single-chip optimization runs (budget=5000):
 | Acoustic Guitar | 8580 | 0.5504 | 122 min | 2.8345 | 252 min |
 | Violin | 6581 | 0.9138 | 49 min | 2.8142 | 275 min |
 
-CMA-ES consistently achieves lower fitness in less time. TPE may be
-useful for exploration or when CMA-ES gets stuck in local optima, but
-it is not recommended as the default. TPE instrument outputs are
-included in the repo under `instruments/*-tpe/` for comparison.
+After fixing TPE parallel evaluation (batch ask/tell), the three-phase
+pipeline with TPE produces competitive results:
+
+| Instrument | Chip | Three-phase TPE Fitness |
+|---|---|---|
+| Grand Piano | 6581 | 0.4310 |
+| Grand Piano | 8580 | 0.4884 |
+
+CMA-ES remains the default, but TPE is now a viable alternative --
+especially for 1-dimensional search spaces where CMA-ES cannot
+operate. TPE instrument outputs are included in the repo under
+`instruments/*-tpe/` for comparison.
 
 ---
 
