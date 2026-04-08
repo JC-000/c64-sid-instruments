@@ -423,9 +423,10 @@ _README_TEMPLATE = """\
 
 | File | Description |
 |---|---|
-| `params.json` | Machine-readable SID parameters |
-| `raw.asm` | ACME-includable assembly tables |
-| `goattracker.ins` | GoatTracker 2.x instrument binary |
+| `{name}-{chip}-params.json` | Machine-readable SID parameters |
+| `{name}-{chip}.asm` | ACME-includable assembly tables |
+| `{name}-{chip}.ins` | GoatTracker 2.x instrument binary |
+| `{name}-{chip}-scale.wav` | SID patch rendered at each reference note |
 | `README.md` | This file |
 """
 
@@ -450,6 +451,7 @@ def _instrument_readme(
               "volume"):
         if k in params_dict:
             rows.append(f"| {k} | {params_dict[k]} |")
+    resolved_chip = chip_model or params_dict.get("chip_model", "unspecified")
     return _README_TEMPLATE.format(
         title=title,
         description=f"A SID chip instrument patch: {name}.",
@@ -457,9 +459,75 @@ def _instrument_readme(
         param_rows="\n".join(rows),
         fitness_score=fitness_score,
         version=version,
-        chip_model=chip_model or params_dict.get("chip_model", "unspecified"),
+        chip_model=resolved_chip,
         source_instrument=source_instrument or params_dict.get("source_instrument", "unspecified"),
+        name=name,
+        chip=resolved_chip,
     )
+
+
+def _render_chromatic_scale(
+    params_dict: dict,
+    chip_model: str,
+    sample_rate: int = 44100,
+    gap_ms: int = 200,
+) -> np.ndarray:
+    """Render the SID patch at each reference note, concatenated with gaps."""
+    reference_notes = params_dict.get("reference_notes", [])
+    gap_samples = int(sample_rate * gap_ms / 1000)
+    gap = np.zeros(gap_samples, dtype=np.float32)
+
+    segments: list[np.ndarray] = []
+    for note_info in reference_notes:
+        note_dict = dict(params_dict)
+        note_dict["frequency"] = note_info["freq_hz"]
+        sid_params = sid_params_from_dict(
+            {k: v for k, v in note_dict.items()
+             if k not in ("fitness_score", "version", "reference_notes")}
+        )
+        audio = render_pyresid(sid_params, sample_rate=sample_rate,
+                               chip_model=chip_model)
+        if segments:
+            segments.append(gap)
+        segments.append(audio)
+
+    return np.concatenate(segments) if segments else np.array([], dtype=np.float32)
+
+
+def _render_reference_scale(
+    reference_set_dir: Path,
+    sample_rate: int = 44100,
+    gap_ms: int = 200,
+) -> Optional[np.ndarray]:
+    """Concatenate reference WAV samples into a chromatic scale."""
+    note_map_path = reference_set_dir / "note_map.json"
+    if not note_map_path.exists():
+        return None
+
+    note_map = json.loads(note_map_path.read_text())
+    gap_samples = int(sample_rate * gap_ms / 1000)
+    gap = np.zeros(gap_samples, dtype=np.float32)
+
+    segments: list[np.ndarray] = []
+    for _note_name, info in note_map.items():
+        wav_path = reference_set_dir / info["file"]
+        if not wav_path.exists():
+            continue
+        data, sr = sf.read(wav_path, dtype="float32")
+        # Convert stereo to mono if needed
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        # Resample if needed
+        if sr != sample_rate:
+            import librosa
+            data = librosa.resample(data, orig_sr=sr, target_sr=sample_rate)
+        if segments:
+            segments.append(gap)
+        segments.append(data)
+
+    if not segments:
+        return None
+    return np.concatenate(segments)
 
 
 def _export_single_chip(
@@ -484,7 +552,7 @@ def _export_single_chip(
     inst_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Versioning ---
-    existing_params_path = inst_dir / "params.json"
+    existing_params_path = inst_dir / f"{name}-{chip_model}-params.json"
     version = 1
     if existing_params_path.exists():
         try:
@@ -508,7 +576,7 @@ def _export_single_chip(
     params_dict["chip_model"] = chip_model
     if source_instrument:
         params_dict["source_instrument"] = source_instrument
-    (inst_dir / "params.json").write_text(
+    (inst_dir / f"{name}-{chip_model}-params.json").write_text(
         json.dumps(params_dict, indent=2) + "\n"
     )
 
@@ -522,13 +590,13 @@ def _export_single_chip(
         sid_params, label, fitness_score=fitness_score, version=version,
         chip_model=chip_model, source_instrument=source_instrument,
     )
-    (inst_dir / "raw.asm").write_text(asm_text)
+    (inst_dir / f"{name}-{chip_model}.asm").write_text(asm_text)
 
     # --- GoatTracker ---
     try:
         from .encoders.goattracker import encode_goattracker
         gt_data = encode_goattracker(sid_params, name)
-        (inst_dir / "goattracker.ins").write_bytes(gt_data)
+        (inst_dir / f"{name}-{chip_model}.ins").write_bytes(gt_data)
     except Exception as e:
         print(f"[cli] [{chip_model}] goattracker encode skipped: {e}", flush=True)
 
@@ -536,7 +604,26 @@ def _export_single_chip(
     render_wav = work_dir / "best_render.wav"
     if render_wav.exists():
         import shutil
-        shutil.copy2(render_wav, inst_dir / "sid_render.wav")
+        shutil.copy2(render_wav, inst_dir / f"{name}-{chip_model}.wav")
+
+    # --- Chromatic scale WAVs ---
+    reference_notes = params_dict.get("reference_notes")
+    if reference_notes and len(reference_notes) > 1:
+        # SID scale
+        scale_audio = _render_chromatic_scale(params_dict, chip_model)
+        sf.write(str(inst_dir / f"{name}-{chip_model}-scale.wav"),
+                 scale_audio, 44100)
+
+        # Reference scale (look for samples dir)
+        project_root = Path(__file__).resolve().parent.parent.parent
+        ref_dir = project_root / "tools" / "samples" / name
+        ref_audio = _render_reference_scale(ref_dir)
+        if ref_audio is not None:
+            # Write reference scale to the instrument base dir (shared across chips)
+            inst_base = inst_dir.parent
+            ref_scale_path = inst_base / f"{name}-reference-scale.wav"
+            if not ref_scale_path.exists():
+                sf.write(str(ref_scale_path), ref_audio, 44100)
 
     print(
         f"[cli] exported {name} [{chip_model}] v{version} "
@@ -583,9 +670,16 @@ Each chip subdirectory contains:
 
 | File | Description |
 |---|---|
-| `params.json` | Machine-readable SID parameters |
-| `raw.asm` | ACME-includable assembly tables |
-| `goattracker.ins` | GoatTracker 2.x instrument binary |
+| `{name}-<chip>-params.json` | Machine-readable SID parameters |
+| `{name}-<chip>.asm` | ACME-includable assembly tables |
+| `{name}-<chip>.ins` | GoatTracker 2.x instrument binary |
+| `{name}-<chip>-scale.wav` | SID patch rendered at each reference note |
+
+Top-level files:
+
+| File | Description |
+|---|---|
+| `{name}-reference-scale.wav` | Concatenated reference samples for comparison |
 """
 
 
