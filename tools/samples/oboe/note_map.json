@@ -1,0 +1,38 @@
+{
+  "Bb3": {
+    "freq_hz": 233.08,
+    "file": "iowa-oboe-Bb3-ff.wav"
+  },
+  "Db4": {
+    "freq_hz": 277.18,
+    "file": "iowa-oboe-Db4-ff.wav"
+  },
+  "E4": {
+    "freq_hz": 329.63,
+    "file": "iowa-oboe-E4-ff.wav"
+  },
+  "G4": {
+    "freq_hz": 392.0,
+    "file": "iowa-oboe-G4-ff.wav"
+  },
+  "Bb4": {
+    "freq_hz": 466.16,
+    "file": "iowa-oboe-Bb4-ff.wav"
+  },
+  "Db5": {
+    "freq_hz": 554.37,
+    "file": "iowa-oboe-Db5-ff.wav"
+  },
+  "E5": {
+    "freq_hz": 659.26,
+    "file": "iowa-oboe-E5-ff.wav"
+  },
+  "G5": {
+    "freq_hz": 783.99,
+    "file": "iowa-oboe-G5-ff.wav"
+  },
+  "Bb5": {
+    "freq_hz": 932.33,
+    "file": "iowa-oboe-Bb5-ff.wav"
+  }
+}
