@@ -8,16 +8,7 @@ A SID chip instrument patch: grand-piano.
 |---|---|---|
 | **Status** | available | available |
 | **Fitness** | 0.4658 | 0.4720 |
-| **Version** | 7 | 8 |
-
-## Optimization Notes
-
-**v5 (2026-04-07):** Re-optimized with `--max-attack 8` to constrain ADSR attack
-to percussive values (≤100ms). The previous v4 optimization after the click fix
-had converged on attack=12 (1000ms) for both chips, producing an unnatural
-muffled onset with rising volume. Constraining the attack to ≤8 (≤100ms) yields
-a fast, piano-appropriate transient (6581: 24ms, 8580: 16ms) with only a small
-fitness trade-off.
+| **Version** | 8 | 9 |
 
 ### 6581 Parameters
 
@@ -81,6 +72,13 @@ Each chip subdirectory contains:
 
 | File | Description |
 |---|---|
-| `params.json` | Machine-readable SID parameters |
-| `raw.asm` | ACME-includable assembly tables |
-| `goattracker.ins` | GoatTracker 2.x instrument binary |
+| `grand-piano-<chip>-params.json` | Machine-readable SID parameters |
+| `grand-piano-<chip>.asm` | ACME-includable assembly tables |
+| `grand-piano-<chip>.ins` | GoatTracker 2.x instrument binary |
+| `grand-piano-<chip>-scale.wav` | SID patch rendered at each reference note |
+
+Top-level files:
+
+| File | Description |
+|---|---|
+| `grand-piano-reference-scale.wav` | Concatenated reference samples for comparison |
