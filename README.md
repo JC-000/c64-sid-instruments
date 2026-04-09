@@ -80,9 +80,19 @@ scalar distance is the **fitness score**.
 
 The fitness function combines multi-scale log-mel MSE (the primary
 timbral measure) with envelope derivative matching, harmonic magnitudes,
-fundamental frequency, and ADSR shape. All components are non-negative
-and normalized to be O(1), so the default weights are directly
-interpretable. The function is symmetric and `distance(x, x) == 0`.
+fundamental frequency, ADSR shape, and three newer perceptual components:
+
+- **Adaptive onset-weighted spectral loss** -- automatically weights the
+  attack transient based on the reference audio's spectral flux (no
+  instrument-type heuristics needed).
+- **MFCC distance** -- captures timbral identity via Mel-frequency
+  cepstral coefficients.
+- **Spectral convergence** -- Frobenius norm ratio between reference and
+  candidate spectrograms.
+
+All components are non-negative and normalized to be O(1), so the
+default weights are directly interpretable. The function is symmetric
+and `distance(x, x) == 0`.
 
 ### How to interpret it
 
@@ -166,6 +176,19 @@ actually build them:
 - **Optuna TPE alternative** -- pass `--optimizer tpe` to use
   Optuna's Tree-structured Parzen Estimator instead of CMA-ES.
   See `tools/sidmatch/README.md` for benchmark comparisons.
+
+- **TPE+CMA-ES warm-start** -- pass `--optimizer tpe+cma` to run a
+  hybrid backend: TPE explores for 25% of the budget, then hands off to
+  CMA-ES with warm-start (mean, sigma, per-dimension standard deviations,
+  and solution injection from TPE's best results).
+
+- **Zimtohrli perceptual re-ranking** -- pass `--perceptual-rerank` to
+  re-rank the top-K candidates using Google's Zimtohrli psychoacoustic
+  metric. Requires `pip install zimtohrli`.
+
+- **Reference SID piano collection** -- 14 HVSC `.sid` files with
+  siddump register analyses are included in
+  `instruments/reference-pianos/` (Detert, Galway, Hubbard, Tel).
 
 The `--chip-model` flag on `sidmatch match` and `sidmatch export`
 selects which emulated SID is used during optimization and rendering.
