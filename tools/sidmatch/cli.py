@@ -44,7 +44,7 @@ from .optimize import (
     sid_params_from_dict,
     load_reference_audio,
 )
-from .grid_search import grid_search, grid_search_multi_note
+from .grid_search import grid_search, grid_search_multi_note, get_instrument_profile
 from .multi_note import ReferenceSet
 from .perceptual import rerank_with_zimtohrli, _is_available as _zimtohrli_available
 from .render import render_pyresid, SidParams
@@ -147,6 +147,10 @@ def _run_match_single_chip(
         f"refinement, budget={args.budget} workers={args.workers}",
         flush=True,
     )
+    instrument_profile = get_instrument_profile(
+        getattr(args, "instrument_type", None)
+    )
+
     grid_results = grid_search(
         ref_wav_path=sample_path,
         ref_frequency_hz=args.frequency,
@@ -161,6 +165,7 @@ def _run_match_single_chip(
         optimizer_backend=getattr(args, "optimizer", "cma"),
         three_phase=getattr(args, "three_phase", True),
         adsr_budget=getattr(args, "adsr_budget", 500),
+        instrument_profile=instrument_profile,
     )
 
     # --- Optional perceptual re-ranking with Zimtohrli ---
@@ -254,6 +259,10 @@ def _run_match_multi_note_chip(
         f"workers={args.workers}",
         flush=True,
     )
+    instrument_profile = get_instrument_profile(
+        getattr(args, "instrument_type", None)
+    )
+
     grid_results = grid_search_multi_note(
         ref_set=ref_set,
         work_dir=work_dir / "grid",
@@ -267,6 +276,7 @@ def _run_match_multi_note_chip(
         optimizer_backend=getattr(args, "optimizer", "cma"),
         three_phase=getattr(args, "three_phase", True),
         adsr_budget=getattr(args, "adsr_budget", 500),
+        instrument_profile=instrument_profile,
     )
 
     result = grid_results[0]
@@ -891,6 +901,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run chip models in parallel when using both (default: False)")
     m.add_argument("--max-attack", type=int, default=15,
                    help="maximum ADSR attack value (0-15, default: 15)")
+    m.add_argument("--instrument-type", default=None,
+                   help="instrument constraint profile (e.g., 'piano') to constrain search space")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
     m.add_argument("--optimizer", default="cma", choices=["cma", "tpe", "tpe+cma"],

@@ -8,7 +8,7 @@ A SID chip instrument patch: grand-piano.
 |---|---|---|
 | **Status** | available | available |
 | **Fitness** | 0.0000 | 0.0000 |
-| **Version** | 13 | 14 |
+| **Version** | 15 | 16 |
 
 ### 6581 Parameters
 

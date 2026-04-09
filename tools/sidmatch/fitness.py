@@ -130,6 +130,11 @@ def _log_mel_mse(ref_mel: tuple | None, cand_mel: tuple | None) -> float:
             continue
         r = r[:, :t]
         c = c[:, :t]
+        # Zero-mean each spectrogram before comparing so that a global
+        # energy offset (e.g. SID vs real instrument loudness) does not
+        # dominate the distance.  This focuses on *spectral shape* over time.
+        r = r - r.mean()
+        c = c - c.mean()
         mse = float(np.mean((r - c) ** 2))
         # Normalize by the mean variance of the two spectrograms so the
         # component stays O(1) regardless of absolute energy scale.
@@ -175,6 +180,9 @@ def _onset_spectral_distance(ref: FeatureVec, cand: FeatureVec) -> float:
             continue
         r = r[:, :t]
         c = c[:, :t]
+        # Zero-mean to focus on spectral shape, not global energy offset.
+        r = r - r.mean()
+        c = c - c.mean()
         mse = float(np.mean((r - c) ** 2))
         var_r = float(np.var(r))
         var_c = float(np.var(c))
@@ -182,7 +190,7 @@ def _onset_spectral_distance(ref: FeatureVec, cand: FeatureVec) -> float:
         total_mse += min(mse / norm, 4.0)
     avg_mse = total_mse / n_scales
 
-    return float(onset_ratio * avg_mse)
+    return float(min(onset_ratio * avg_mse, 4.0))
 
 
 def _mfcc_distance(ref: FeatureVec, cand: FeatureVec) -> float:

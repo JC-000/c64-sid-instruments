@@ -51,6 +51,114 @@ from .optimize import (
 from .features import FeatureVec, extract, CANONICAL_SR
 
 
+# ---------------------------------------------------------------------------
+# Instrument-type constraint profiles
+# ---------------------------------------------------------------------------
+
+INSTRUMENT_PROFILES: dict = {
+    "piano": {
+        "adsr_bounds": {
+            "attack": (0, 2),    # fast attack (piano hammer is instant)
+            "decay": (9, 15),    # long decay (piano rings for seconds)
+            "sustain": (0, 3),   # low sustain (piano always decays to silence)
+            "release": (3, 9),   # moderate release
+        },
+        # Override screening defaults for better Phase 1 ordering.
+        "screening_defaults": {
+            "attack": 0,
+            "decay": 12,
+            "sustain": 0,
+            "release": 6,
+            "pw_start": 2048,
+            "pw_delta": 4,
+        },
+        # Only allow combos whose sustain waveform includes pulse (for PWM).
+        "require_pulse_sustain": True,
+        # Require a distinct attack waveform (not same_as_sustain).
+        "require_attack_waveform": True,
+        # Prefer lowpass filter.
+        "preferred_filters": ["lp", "off"],
+        # Minimum gate_frames floor (overrides ADSR-computed value).
+        "min_gate_frames": 100,
+    },
+}
+
+
+def get_instrument_profile(name: str | None) -> dict | None:
+    """Return an instrument constraint profile by name, or None."""
+    if name is None:
+        return None
+    profile = INSTRUMENT_PROFILES.get(name)
+    if profile is None:
+        valid = ", ".join(sorted(INSTRUMENT_PROFILES.keys()))
+        raise ValueError(
+            f"unknown instrument type {name!r}; valid types: {valid}"
+        )
+    return profile
+
+
+def _apply_profile_to_combos(combos: list, profile: dict | None) -> list:
+    """Filter discrete combos according to instrument profile constraints."""
+    if profile is None:
+        return combos
+
+    filtered = combos
+    if profile.get("require_pulse_sustain"):
+        filtered = [
+            c for c in filtered
+            if c["wt_sustain_waveform"] == "pulse"
+            or "pulse" in c["wt_sustain_waveform"]
+            or any(
+                "pulse" in wf for wf, _d in c.get("wavetable_steps", [])
+                if wf == c.get("wavetable_steps", [(-1,)])[-1][0]
+            )
+        ]
+
+    if profile.get("require_attack_waveform"):
+        filtered = [
+            c for c in filtered
+            if c["wt_attack_waveform"] != "same_as_sustain"
+        ]
+
+    preferred_filters = profile.get("preferred_filters")
+    if preferred_filters:
+        pref = [c for c in filtered if c["filter_mode"] in preferred_filters]
+        # Fall back to all if filtering removes everything.
+        if pref:
+            filtered = pref
+
+    if not filtered:
+        # Safety: don't return empty list, fall back to original.
+        return combos
+    return filtered
+
+
+def _apply_profile_to_screening_defaults(
+    defaults: dict, profile: dict | None,
+) -> dict:
+    """Override screening defaults with instrument profile values."""
+    if profile is None:
+        return defaults
+    merged = dict(defaults)
+    for key, val in profile.get("screening_defaults", {}).items():
+        merged[key] = val
+    return merged
+
+
+def _adsr_bounds_from_profile(profile: dict | None) -> dict | None:
+    """Extract ADSR bounds dict {index: (lo, hi)} from a profile.
+
+    Returns None if no profile or no adsr_bounds in the profile.
+    """
+    if profile is None:
+        return None
+    ab = profile.get("adsr_bounds")
+    if ab is None:
+        return None
+    idx_map = {"attack": 0, "decay": 1, "sustain": 2, "release": 3}
+    return {idx_map[k]: v for k, v in ab.items() if k in idx_map}
+
+
 # Sustain waveforms to try.
 SUSTAIN_WAVEFORMS = ["saw", "pulse", "triangle"]
 
@@ -267,6 +375,7 @@ def grid_search(
     optimizer_backend: str = "cma",
     three_phase: bool = True,
     adsr_budget: int = 500,
+    instrument_profile: Optional[dict] = None,
 ) -> List[OptimizerResult]:
     """Grid search: screen all combos, then refine top K.
 
@@ -300,6 +409,15 @@ def grid_search(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     combos = _build_combos()
+    combos = _apply_profile_to_combos(combos, instrument_profile)
+
+    # Merge instrument profile into screening defaults.
+    eff_screening = _apply_profile_to_screening_defaults(
+        _SCREENING_DEFAULTS, instrument_profile,
+    )
+    # Compute ADSR bound overrides from the profile.
+    adsr_bound_overrides = _adsr_bounds_from_profile(instrument_profile)
+    min_gate_frames = (instrument_profile or {}).get("min_gate_frames")
 
     # --- Phase 1: fast screening (1 eval per combo) ---
     t0 = time.time()
@@ -355,7 +473,7 @@ def grid_search(
         "filter_cutoff_start", "filter_cutoff_end",
         "filter_sweep_frames", "filter_resonance", "wt_attack_frames",
     ]):
-        screening_x0[i] = _SCREENING_DEFAULTS[key]
+        screening_x0[i] = eff_screening.get(key, _SCREENING_DEFAULTS[key])
 
     # Divide workers across parallel combos so total CPU stays bounded.
     total_workers = n_workers or (os.cpu_count() or 1)
@@ -413,6 +531,8 @@ def grid_search(
                 use_surrogate=False,
                 optimizer_backend=optimizer_backend,
                 freeze_indices=freeze,
+                adsr_bound_overrides=adsr_bound_overrides,
+                min_gate_frames=min_gate_frames,
             )
             res = opt.run()
 
@@ -530,6 +650,8 @@ def grid_search(
                     warm_start=True,
                     optimizer_backend=optimizer_backend,
                     freeze_indices=adsr_freeze,
+                    adsr_bound_overrides=adsr_bound_overrides,
+                    min_gate_frames=min_gate_frames,
                 )
                 res = opt.run()
 
@@ -697,6 +819,8 @@ def grid_search(
                     max_attack=max_attack,
                     warm_start=True,
                     optimizer_backend=optimizer_backend,
+                    adsr_bound_overrides=adsr_bound_overrides,
+                    min_gate_frames=min_gate_frames,
                 )
                 res = opt.run()
 
@@ -849,6 +973,7 @@ def grid_search_multi_note(
     optimizer_backend: str = "cma",
     three_phase: bool = True,
     adsr_budget: int = 500,
+    instrument_profile: Optional[dict] = None,
 ) -> List[OptimizerResult]:
     """Grid search using multi-note evaluation.
 
@@ -888,6 +1013,15 @@ def grid_search_multi_note(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     combos = _build_combos()
+    combos = _apply_profile_to_combos(combos, instrument_profile)
+
+    # Merge instrument profile into screening defaults.
+    eff_screening = _apply_profile_to_screening_defaults(
+        _SCREENING_DEFAULTS, instrument_profile,
+    )
+    # Compute ADSR bound overrides from the profile.
+    adsr_bound_overrides = _adsr_bounds_from_profile(instrument_profile)
+    min_gate_frames = (instrument_profile or {}).get("min_gate_frames")
 
     # --- Phase 1: fast screening ---
     t0 = time.time()
@@ -942,7 +1076,7 @@ def grid_search_multi_note(
         "filter_cutoff_start", "filter_cutoff_end",
         "filter_sweep_frames", "filter_resonance", "wt_attack_frames",
     ]):
-        screening_x0[i] = _SCREENING_DEFAULTS[key]
+        screening_x0[i] = eff_screening.get(key, _SCREENING_DEFAULTS[key])
 
     # Divide workers across parallel combos so total CPU stays bounded.
     total_workers = n_workers or (os.cpu_count() or 1)
@@ -997,6 +1131,8 @@ def grid_search_multi_note(
                 use_surrogate=False,
                 optimizer_backend=optimizer_backend,
                 freeze_indices=freeze,
+                adsr_bound_overrides=adsr_bound_overrides,
+                min_gate_frames=min_gate_frames,
             )
             res = opt.run()
 
@@ -1111,6 +1247,8 @@ def grid_search_multi_note(
                     warm_start=True,
                     optimizer_backend=optimizer_backend,
                     freeze_indices=adsr_freeze,
+                    adsr_bound_overrides=adsr_bound_overrides,
+                    min_gate_frames=min_gate_frames,
                 )
                 res = opt.run()
 
@@ -1273,6 +1411,8 @@ def grid_search_multi_note(
                     max_attack=max_attack,
                     warm_start=True,
                     optimizer_backend=optimizer_backend,
+                    adsr_bound_overrides=adsr_bound_overrides,
+                    min_gate_frames=min_gate_frames,
                 )
                 res = opt.run()
 
