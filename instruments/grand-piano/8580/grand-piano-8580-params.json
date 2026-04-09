@@ -1,37 +1,54 @@
 {
-  "waveform": "saw",
-  "attack": 2,
-  "decay": 6,
-  "sustain": 15,
-  "release": 12,
-  "pulse_width": 4033,
+  "waveform": "pulse",
+  "attack": 0,
+  "decay": 9,
+  "sustain": 0,
+  "release": 9,
+  "pulse_width": 6,
   "pw_table": null,
-  "filter_cutoff": 210,
-  "filter_resonance": 3,
-  "filter_mode": "lp",
-  "filter_voice1": true,
+  "filter_cutoff": 44,
+  "filter_resonance": 8,
+  "filter_mode": "off",
+  "filter_voice1": false,
   "ring_mod": false,
   "sync": false,
   "frequency": 440.0,
-  "gate_frames": 16,
-  "release_frames": 155,
+  "gate_frames": 100,
+  "release_frames": 42,
   "wavetable": null,
   "volume": 15,
   "chip_model": "8580",
-  "source_instrument": "Salamander Grand Piano (CC-BY 3.0)",
+  "source_instrument": null,
   "wt_attack_frames": 5,
-  "wt_attack_waveform": "pulse+saw",
-  "wt_sustain_waveform": "saw",
+  "wt_attack_waveform": "noise",
+  "wt_sustain_waveform": "pulse",
   "wt_use_test_bit": true,
-  "pw_start": 4033,
-  "pw_delta": -48,
-  "pw_min": 901,
-  "pw_max": 1460,
+  "pw_start": 6,
+  "pw_delta": -28,
+  "pw_min": 0,
+  "pw_max": 1487,
   "pw_mode": "sweep",
-  "wavetable_steps": null,
-  "filter_cutoff_start": 210,
-  "filter_cutoff_end": 153,
-  "filter_sweep_frames": 90,
+  "wavetable_steps": [
+    [
+      "noise",
+      1
+    ],
+    [
+      "saw",
+      2
+    ],
+    [
+      "pulse+saw",
+      3
+    ],
+    [
+      "pulse",
+      0
+    ]
+  ],
+  "filter_cutoff_start": 44,
+  "filter_cutoff_end": 44,
+  "filter_sweep_frames": 50,
   "reference_notes": [
     {
       "note": "C3",
@@ -70,7 +87,6 @@
       "freq_hz": 523.25
     }
   ],
-  "fitness_score": 0.472,
-  "version": 15,
-  "notes": "Restored from v8 baseline (commit 7dbf445) - better tonal quality than re-optimized versions"
+  "fitness_score": 0.0,
+  "version": 16
 }

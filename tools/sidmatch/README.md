@@ -460,6 +460,54 @@ no quality regression in fitness scores.
 
 ---
 
+## Instrument-type constraints
+
+The `--instrument-type` flag restricts the optimizer search space to
+parameter ranges appropriate for a specific instrument family.  This
+dramatically reduces wall-clock time and prevents the optimizer from
+settling on acoustically implausible parameter sets.
+
+### Usage
+
+```bash
+python3 -m tools.sidmatch.cli match ref.wav output/ --instrument-type piano
+```
+
+### Available profiles
+
+| Profile | ADSR bounds | Waveform filter | Other |
+|---------|------------|-----------------|-------|
+| `piano` | A<=2, D>=9, S<=3, R=3-9 | pulse sustain required | attack waveform required, min 100 gate frames |
+
+### What each profile constrains
+
+- **ADSR bounds** -- restricts attack, decay, sustain, and release to
+  ranges that match the instrument's physical envelope.  Bounds are
+  applied as overrides in all optimizer backends (CMA-ES, TPE,
+  TPE+CMA-ES).
+- **Waveform filtering** -- removes discrete combo candidates whose
+  sustain waveform does not include the expected wave shape (e.g. pulse
+  for piano PWM tone).
+- **Attack waveform requirement** -- forces a distinct attack transient
+  waveform rather than reusing the sustain waveform.
+- **Minimum gate frames** -- sets a floor on how long the gate stays
+  open, preventing the optimizer from shortening notes below what the
+  instrument physically requires.
+
+### Adding a new profile
+
+1. Add an entry to `INSTRUMENT_PROFILES` in `grid_search.py` with keys:
+   - `adsr_bounds` -- dict of `(min, max)` tuples for attack, decay,
+     sustain, release.
+   - `screening_defaults` -- default ADSR/pulse values for Phase 1
+     screening.
+   - `require_pulse_sustain` -- bool, filter combos to pulse sustain.
+   - `require_attack_waveform` -- bool, require distinct attack wave.
+   - `min_gate_frames` -- int, minimum gate duration in frames.
+2. The profile is automatically available via `--instrument-type <name>`.
+
+---
+
 ## Environment
 
 ```
