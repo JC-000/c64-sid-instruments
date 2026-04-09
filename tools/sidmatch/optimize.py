@@ -525,7 +525,7 @@ def _eval_single(
 
 
 def _fv_to_dict(fv: FeatureVec) -> dict:
-    return {
+    d = {
         "sr": fv.sr,
         "duration_s": fv.duration_s,
         "amplitude_envelope": np.asarray(fv.amplitude_envelope).tolist(),
@@ -539,10 +539,27 @@ def _fv_to_dict(fv: FeatureVec) -> dict:
         "spectral_flatness": np.asarray(fv.spectral_flatness).tolist(),
         "fundamental_hz": fv.fundamental_hz,
         "noisiness": fv.noisiness,
+        "onset_energy_ratio": fv.onset_energy_ratio,
+        "onset_log_mel": (
+            tuple(np.asarray(m).tolist() for m in fv.onset_log_mel)
+            if fv.onset_log_mel is not None else None
+        ),
+        "mfcc": np.asarray(fv.mfcc).tolist() if fv.mfcc is not None else None,
+        "stft_mag": np.asarray(fv.stft_mag).tolist() if fv.stft_mag is not None else None,
     }
+    return d
 
 
 def _fv_from_dict(d: dict) -> FeatureVec:
+    onset_log_mel_raw = d.get("onset_log_mel")
+    onset_log_mel = (
+        tuple(np.asarray(m, dtype=np.float32) for m in onset_log_mel_raw)
+        if onset_log_mel_raw is not None else None
+    )
+    mfcc_raw = d.get("mfcc")
+    mfcc = np.asarray(mfcc_raw, dtype=np.float32) if mfcc_raw is not None else None
+    stft_raw = d.get("stft_mag")
+    stft_mag = np.asarray(stft_raw, dtype=np.float32) if stft_raw is not None else None
     return FeatureVec(
         sr=int(d["sr"]),
         duration_s=float(d["duration_s"]),
@@ -557,6 +574,10 @@ def _fv_from_dict(d: dict) -> FeatureVec:
         spectral_flatness=np.asarray(d["spectral_flatness"], dtype=np.float64),
         fundamental_hz=float(d["fundamental_hz"]),
         noisiness=float(d["noisiness"]),
+        onset_energy_ratio=float(d.get("onset_energy_ratio", 0.0)),
+        onset_log_mel=onset_log_mel,
+        mfcc=mfcc,
+        stft_mag=stft_mag,
     )
 
 
@@ -818,6 +839,8 @@ class Optimizer:
     def run(self) -> OptimizerResult:
         if self.optimizer_backend == "tpe":
             return self._run_tpe()
+        if self.optimizer_backend == "tpe+cma":
+            return self._run_tpe_then_cma()
         return self._run_cma()
 
     def _run_tpe(self) -> OptimizerResult:
@@ -1371,6 +1394,442 @@ class Optimizer:
             converged=converged,
         )
 
+    def _run_tpe_then_cma(self, tpe_fraction: float = 0.25) -> OptimizerResult:
+        """Two-phase optimization: TPE exploration then CMA-ES refinement.
+
+        Runs TPE for *tpe_fraction* of the budget to explore the search space,
+        then warm-starts CMA-ES with the top-K solutions for the remaining budget.
+        """
+        try:
+            import optuna
+        except ImportError:
+            raise ImportError(
+                "optuna is required for TPE optimizer: pip install optuna"
+            )
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        t0 = time.time()
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+
+        act_idx = active_params(self.fixed_kwargs)
+        if self.freeze_indices:
+            act_idx = [i for i in act_idx if i not in self.freeze_indices]
+        n_active = len(act_idx)
+
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)
+
+        def _normalize(x_orig):
+            return (x_orig - lo_red) / range_red_safe
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
+
+        tpe_budget = max(1, int(self.budget * tpe_fraction))
+        cma_budget = self.budget - tpe_budget
+
+        history: List[float] = []
+        best_fitness = float("inf")
+        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        for fidx, fval in self.freeze_indices.items():
+            best_x_full[fidx] = fval
+        evaluations = 0
+        non_improve = 0
+        converged = False
+
+        # Collect all evaluated solutions (normalized) and their fitnesses.
+        all_solutions_norm: List[np.ndarray] = []
+        all_fitnesses: List[float] = []
+
+        # ---- Phase 1: TPE exploration ----
+        current_render_dur = self._render_duration_for_eval(0)
+        current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, tpe_budget // 2),
+                multivariate=True,
+                group=True,
+                constant_liar=True,
+                n_ei_candidates=256,
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
+
+        def _trial_to_x_full(trial):
+            x_red = np.empty(n_active, dtype=np.float64)
+            for i, orig_i in enumerate(act_idx):
+                name = _PARAM_NAMES[orig_i]
+                if orig_i in _INTEGER_PARAM_INDICES:
+                    val = trial.suggest_int(
+                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                    )
+                    x_red[i] = float(val)
+                else:
+                    norm = trial.suggest_float(name, 0.0, 1.0)
+                    x_red[i] = norm * range_red_safe[i] + lo_red[i]
+            x_full = _expand_vector(x_red, act_idx, bounds_high)
+            for fidx, fval in self.freeze_indices.items():
+                x_full[fidx] = fval
+            return x_full
+
+        n_workers = self.n_workers
+        pool = None
+        best_fitness_shared = None
+        ref_fv_dict = _fv_to_dict(current_ref_fv)
+        if n_workers > 1:
+            best_fitness_shared = mp.Value('d', float('inf'))
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=n_workers,
+                initializer=_worker_init,
+                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                          best_fitness_shared, current_render_dur),
+            )
+
+        try:
+            while evaluations < tpe_budget and non_improve < self.patience:
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    ref_fv_dict = _fv_to_dict(current_ref_fv)
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = float("inf")
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=n_workers,
+                            initializer=_worker_init,
+                            initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                                      best_fitness_shared, current_render_dur),
+                        )
+
+                batch_size = min(n_workers, tpe_budget - evaluations)
+                trials = [study.ask() for _ in range(batch_size)]
+                candidates_full = [_trial_to_x_full(t) for t in trials]
+                candidates_list = [list(c) for c in candidates_full]
+
+                if pool is not None:
+                    fitnesses = pool.map(_worker_eval, candidates_list)
+                else:
+                    fitnesses = [
+                        _eval_single(
+                            np.asarray(c), self.fixed_kwargs, current_ref_fv,
+                            self.weights, best_fitness=best_fitness,
+                            render_dur_s=current_render_dur,
+                        )
+                        for c in candidates_list
+                    ]
+
+                for trial, fitness, x_full in zip(trials, fitnesses, candidates_full):
+                    study.tell(trial, fitness)
+                    evaluations += 1
+                    # Store normalized solution for CMA-ES warm-start.
+                    x_red = _reduce_vector(x_full, act_idx)
+                    x_norm = _normalize(x_red)
+                    all_solutions_norm.append(x_norm)
+                    all_fitnesses.append(fitness)
+                    if fitness < best_fitness - 1e-9:
+                        best_fitness = fitness
+                        best_x_full = x_full.copy()
+                        non_improve = 0
+                        if best_fitness_shared is not None:
+                            best_fitness_shared.value = best_fitness
+                    else:
+                        non_improve += 1
+                    history.append(best_fitness)
+
+                if self.work_dir is not None and evaluations % 100 < batch_size:
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                if self.log_interval > 0 and evaluations % self.log_interval < batch_size:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-tpe+cma/tpe] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if non_improve >= self.patience:
+                    converged = True
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                pool = None
+
+        if converged or cma_budget <= 0 or n_active < 2:
+            # TPE converged or no budget left or too few dims for CMA-ES.
+            self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+            wall = time.time() - t0
+            best_params = decode_params(best_x_full, self.fixed_kwargs)
+            return OptimizerResult(
+                best_params=best_params,
+                best_fitness=best_fitness,
+                history=history,
+                evaluations=evaluations,
+                wall_time_s=wall,
+                converged=converged,
+            )
+
+        # ---- Phase 2: CMA-ES refinement warm-started from TPE results ----
+
+        # Extract top-K solutions from TPE phase.
+        all_fitnesses_arr = np.array(all_fitnesses, dtype=np.float64)
+        all_solutions_arr = np.array(all_solutions_norm, dtype=np.float64)
+        k = min(20, max(1, len(all_fitnesses) // 5))
+        top_k_indices = np.argsort(all_fitnesses_arr)[:k]
+        top_k_solutions = all_solutions_arr[top_k_indices]
+
+        # Compute mean and per-dimension std from top-K.
+        x0_cma = np.mean(top_k_solutions, axis=0)
+        if k > 1:
+            per_dim_std = np.std(top_k_solutions, axis=0)
+        else:
+            per_dim_std = np.full(n_active, 0.1)
+        per_dim_std = np.clip(per_dim_std, 0.01, 0.5)
+
+        sigma0 = float(np.median(per_dim_std))
+        if sigma0 < 1e-6:
+            sigma0 = 0.1
+        cma_stds = per_dim_std / sigma0
+
+        # Clip x0 to valid bounds.
+        x0_cma = np.clip(x0_cma, 0.0, 1.0)
+
+        cma_opts = {
+            "bounds": [np.zeros(n_active).tolist(), np.ones(n_active).tolist()],
+            "seed": self.seed if self.seed != 0 else 1,
+            "verbose": -9,
+            "maxfevals": cma_budget,
+            "CMA_stds": cma_stds.tolist(),
+        }
+        es = cma.CMAEvolutionStrategy(x0_cma.tolist(), sigma0, cma_opts)
+
+        # Inject top-K solutions into CMA-ES (limit to popsize to avoid
+        # "unused injected direction/solutions" error from pycma).
+        inject_solutions = [s.tolist() for s in top_k_solutions[:es.popsize]]
+        es.inject(inject_solutions)
+
+        # Reset patience for CMA-ES phase.
+        non_improve = 0
+
+        # Surrogate model for pre-screening candidates.
+        surrogate: Optional[FitnessSurrogate] = None
+        surr_X: List[np.ndarray] = []
+        surr_y: List[float] = []
+        surr_train_threshold = 500
+        surr_retrain_interval = 200
+        surr_last_train_count = 0
+        adsr_sweep_done = False
+
+        # Seed surrogate with TPE data.
+        if self.use_surrogate:
+            surr_X = list(all_solutions_arr)
+            surr_y = list(all_fitnesses)
+
+        # Coarse-to-fine rendering for CMA-ES phase.
+        current_render_dur = self._render_duration_for_eval(evaluations)
+        current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+
+        frozen_values = dict(self.freeze_indices)
+
+        pool = None
+        best_fitness_shared = None
+        ref_fv_dict = _fv_to_dict(current_ref_fv)
+        if self.n_workers > 1:
+            best_fitness_shared = mp.Value('d', best_fitness)
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=self.n_workers,
+                initializer=_worker_init,
+                initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                          best_fitness_shared, current_render_dur),
+            )
+
+        try:
+            while evaluations < self.budget:
+                if es.stop():
+                    break
+
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    ref_fv_dict = _fv_to_dict(current_ref_fv)
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    surr_X.clear()
+                    surr_y.clear()
+                    surrogate = None
+                    surr_last_train_count = 0
+                    adsr_sweep_done = False
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = float("inf")
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=self.n_workers,
+                            initializer=_worker_init,
+                            initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
+                                      best_fitness_shared, current_render_dur),
+                        )
+
+                solutions_norm = es.ask()
+                solutions_full = [
+                    _expand_vector(_denormalize(np.asarray(s)), act_idx, bounds_high)
+                    for s in solutions_norm
+                ]
+                if frozen_values:
+                    for sf in solutions_full:
+                        for fidx, fval in frozen_values.items():
+                            sf[fidx] = fval
+                solutions_full_list = [list(s) for s in solutions_full]
+
+                # Surrogate pre-screening.
+                eval_indices = list(range(len(solutions_norm)))
+                surr_predictions: Optional[np.ndarray] = None
+                if self.use_surrogate and surrogate is not None and surrogate.is_ready:
+                    norm_arr = np.array(solutions_norm, dtype=np.float64)
+                    surr_predictions = surrogate.predict(norm_arr)
+                    n_keep = max(1, len(solutions_norm) // 2)
+                    ranked = np.argsort(surr_predictions)
+                    eval_indices = sorted(ranked[:n_keep].tolist())
+
+                eval_full_list = [solutions_full_list[i] for i in eval_indices]
+                if pool is not None:
+                    eval_fitnesses = pool.map(_worker_eval, eval_full_list)
+                else:
+                    eval_fitnesses = [
+                        _eval_single(
+                            np.asarray(s), self.fixed_kwargs, current_ref_fv,
+                            self.weights, best_fitness=best_fitness,
+                            render_dur_s=current_render_dur,
+                        )
+                        for s in eval_full_list
+                    ]
+
+                fitnesses = [0.0] * len(solutions_norm)
+                eval_map = dict(zip(eval_indices, eval_fitnesses))
+                for i in range(len(solutions_norm)):
+                    if i in eval_map:
+                        fitnesses[i] = eval_map[i]
+                    elif surr_predictions is not None:
+                        fitnesses[i] = float(surr_predictions[i])
+                    else:
+                        fitnesses[i] = 1e6
+
+                es.tell(solutions_norm, fitnesses)
+
+                # Accumulate data for surrogate training.
+                if self.use_surrogate:
+                    for i in eval_indices:
+                        surr_X.append(np.asarray(solutions_norm[i], dtype=np.float64))
+                        surr_y.append(eval_map[i])
+                    total_surr = len(surr_y)
+                    if total_surr >= surr_train_threshold and (
+                        surrogate is None
+                        or total_surr - surr_last_train_count >= surr_retrain_interval
+                    ):
+                        if surrogate is None:
+                            surrogate = FitnessSurrogate(input_dim=n_active)
+                        surrogate.fit(np.array(surr_X), np.array(surr_y))
+                        surr_last_train_count = total_surr
+
+                        if not adsr_sweep_done and surrogate.is_ready:
+                            adsr_sweep_done = True
+                            best_x_red = _reduce_vector(best_x_full, act_idx)
+                            best_x_norm_current = _normalize(best_x_red)
+                            adsr_candidates = _surrogate_adsr_sweep(
+                                surrogate, best_x_norm_current, act_idx,
+                                lo_red, hi_red, top_n=20,
+                            )
+                            n_verify = min(5, adsr_candidates.shape[0])
+                            for ci in range(n_verify):
+                                cand_norm = adsr_candidates[ci]
+                                cand_red = _denormalize(cand_norm)
+                                cand_full = _expand_vector(cand_red, act_idx, bounds_high)
+                                if frozen_values:
+                                    for fidx, fval in frozen_values.items():
+                                        cand_full[fidx] = fval
+                                cand_fitness = _eval_single(
+                                    cand_full, self.fixed_kwargs, current_ref_fv,
+                                    self.weights, best_fitness=best_fitness,
+                                    render_dur_s=current_render_dur,
+                                )
+                                evaluations += 1
+                                surr_X.append(cand_norm.copy())
+                                surr_y.append(cand_fitness)
+                                if cand_fitness < best_fitness - 1e-9:
+                                    best_fitness = cand_fitness
+                                    best_x_full = cand_full.copy()
+                                    non_improve = 0
+                                    if best_fitness_shared is not None:
+                                        best_fitness_shared.value = best_fitness
+                                    es.inject([cand_norm.tolist()])
+
+                evaluations += len(eval_fitnesses)
+                gen_best = float(min(fitnesses))
+                gen_best_idx = int(np.argmin(fitnesses))
+                if gen_best < best_fitness - 1e-9:
+                    best_fitness = gen_best
+                    best_x_full = np.asarray(solutions_full_list[gen_best_idx], dtype=np.float64)
+                    non_improve = 0
+                    if best_fitness_shared is not None:
+                        best_fitness_shared.value = best_fitness
+                else:
+                    non_improve += len(fitnesses)
+                history.append(best_fitness)
+
+                if self.log_interval > 0 and (
+                    evaluations // self.log_interval
+                    != (evaluations - len(fitnesses)) // self.log_interval
+                ):
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-tpe+cma/cma] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if self.work_dir is not None and (
+                    evaluations // 100
+                    != (evaluations - len(fitnesses)) // 100
+                ):
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                if non_improve >= self.patience:
+                    converged = True
+                    break
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+        wall = time.time() - t0
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
+        return OptimizerResult(
+            best_params=best_params,
+            best_fitness=best_fitness,
+            history=history,
+            evaluations=evaluations,
+            wall_time_s=wall,
+            converged=converged,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Multi-note worker pool
@@ -1647,6 +2106,8 @@ class MultiNoteOptimizer:
     def run(self) -> OptimizerResult:
         if self.optimizer_backend == "tpe":
             return self._run_tpe()
+        if self.optimizer_backend == "tpe+cma":
+            return self._run_tpe_then_cma()
         return self._run_cma()
 
     def _run_tpe(self) -> OptimizerResult:
@@ -2163,6 +2624,435 @@ class MultiNoteOptimizer:
                     elapsed = time.time() - t0
                     print(
                         f"[optim-mn] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if self.work_dir is not None and (
+                    evaluations // 100
+                    != (evaluations - len(fitnesses)) // 100
+                ):
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                if non_improve >= self.patience:
+                    converged = True
+                    break
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+
+        self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+        wall = time.time() - t0
+        best_params = decode_params(best_x_full, self.fixed_kwargs)
+        return OptimizerResult(
+            best_params=best_params,
+            best_fitness=best_fitness,
+            history=history,
+            evaluations=evaluations,
+            wall_time_s=wall,
+            converged=converged,
+        )
+
+    def _run_tpe_then_cma(self, tpe_fraction: float = 0.25) -> OptimizerResult:
+        """Two-phase optimization: TPE exploration then CMA-ES refinement.
+
+        Runs TPE for *tpe_fraction* of the budget to explore the search space,
+        then warm-starts CMA-ES with the top-K solutions for the remaining budget.
+        """
+        try:
+            import optuna
+        except ImportError:
+            raise ImportError(
+                "optuna is required for TPE optimizer: pip install optuna"
+            )
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        from .multi_note import multi_note_fitness
+
+        t0 = time.time()
+        bounds_high = BOUNDS_HIGH.copy()
+        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+
+        act_idx = active_params(self.fixed_kwargs)
+        if self.freeze_indices:
+            act_idx = [i for i in act_idx if i not in self.freeze_indices]
+        n_active = len(act_idx)
+
+        lo_red = BOUNDS_LOW[act_idx]
+        hi_red = bounds_high[act_idx]
+        range_red = hi_red - lo_red
+        range_red_safe = np.where(range_red > 0, range_red, 1.0)
+
+        def _normalize(x_orig):
+            return (x_orig - lo_red) / range_red_safe
+
+        def _denormalize(x_norm):
+            return x_norm * range_red_safe + lo_red
+
+        tpe_budget = max(1, int(self.budget * tpe_fraction))
+        cma_budget = self.budget - tpe_budget
+
+        history: List[float] = []
+        best_fitness = float("inf")
+        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        for fidx, fval in self.freeze_indices.items():
+            best_x_full[fidx] = fval
+        evaluations = 0
+        non_improve = 0
+        converged = False
+
+        # Collect all evaluated solutions (normalized) and their fitnesses.
+        all_solutions_norm: List[np.ndarray] = []
+        all_fitnesses_list: List[float] = []
+
+        # ---- Phase 1: TPE exploration ----
+        current_render_dur = self._render_duration_for_eval(0)
+        chip_model = self.fixed_kwargs.get("chip_model")
+
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=min(50, tpe_budget // 2),
+                multivariate=True,
+                group=True,
+                constant_liar=True,
+                n_ei_candidates=256,
+                seed=self.seed if self.seed != 0 else None,
+            ),
+            direction="minimize",
+        )
+
+        def _trial_to_x_full(trial):
+            x_red = np.empty(n_active, dtype=np.float64)
+            for i, orig_i in enumerate(act_idx):
+                name = _PARAM_NAMES[orig_i]
+                if orig_i in _INTEGER_PARAM_INDICES:
+                    val = trial.suggest_int(
+                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                    )
+                    x_red[i] = float(val)
+                else:
+                    norm = trial.suggest_float(name, 0.0, 1.0)
+                    x_red[i] = norm * range_red_safe[i] + lo_red[i]
+            x_full = _expand_vector(x_red, act_idx, bounds_high)
+            for fidx, fval in self.freeze_indices.items():
+                x_full[fidx] = fval
+            return x_full
+
+        n_workers = self.n_workers
+        pool = None
+        ref_set_data = _ref_set_to_data(self.ref_set)
+        if n_workers > 1:
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=n_workers,
+                initializer=_mn_worker_init,
+                initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                          self.alpha, current_render_dur),
+            )
+
+        try:
+            while evaluations < tpe_budget and non_improve < self.patience:
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=n_workers,
+                            initializer=_mn_worker_init,
+                            initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                                      self.alpha, current_render_dur),
+                        )
+
+                batch_size = min(n_workers, tpe_budget - evaluations)
+                trials = [study.ask() for _ in range(batch_size)]
+                candidates_full = [_trial_to_x_full(t) for t in trials]
+                candidates_list = [list(c) for c in candidates_full]
+
+                if pool is not None:
+                    fitnesses = pool.map(_mn_worker_eval, candidates_list)
+                else:
+                    fitnesses = []
+                    for c in candidates_list:
+                        params = decode_params(np.asarray(c), self.fixed_kwargs)
+                        try:
+                            f = float(multi_note_fitness(
+                                params, self.ref_set,
+                                weights=self.weights,
+                                alpha=self.alpha,
+                                chip_model=chip_model,
+                                render_duration_s=current_render_dur,
+                            ))
+                        except Exception:
+                            f = 1e6
+                        fitnesses.append(f)
+
+                for trial, fitness, x_full in zip(trials, fitnesses, candidates_full):
+                    study.tell(trial, fitness)
+                    evaluations += 1
+                    x_red = _reduce_vector(x_full, act_idx)
+                    x_norm = _normalize(x_red)
+                    all_solutions_norm.append(x_norm)
+                    all_fitnesses_list.append(fitness)
+                    if fitness < best_fitness - 1e-9:
+                        best_fitness = fitness
+                        best_x_full = x_full.copy()
+                        non_improve = 0
+                    else:
+                        non_improve += 1
+                    history.append(best_fitness)
+
+                if self.work_dir is not None and evaluations % 100 < batch_size:
+                    self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+
+                if self.log_interval > 0 and evaluations % self.log_interval < batch_size:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-mn-tpe+cma/tpe] evals={evaluations}/{self.budget} "
+                        f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
+                        flush=True,
+                    )
+
+                if non_improve >= self.patience:
+                    converged = True
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+                pool = None
+
+        if converged or cma_budget <= 0 or n_active < 2:
+            self._save_checkpoint(best_x_full, best_fitness, history, evaluations)
+            wall = time.time() - t0
+            best_params = decode_params(best_x_full, self.fixed_kwargs)
+            return OptimizerResult(
+                best_params=best_params,
+                best_fitness=best_fitness,
+                history=history,
+                evaluations=evaluations,
+                wall_time_s=wall,
+                converged=converged,
+            )
+
+        # ---- Phase 2: CMA-ES refinement warm-started from TPE results ----
+
+        all_fitnesses_arr = np.array(all_fitnesses_list, dtype=np.float64)
+        all_solutions_arr = np.array(all_solutions_norm, dtype=np.float64)
+        k = min(20, max(1, len(all_fitnesses_list) // 5))
+        top_k_indices = np.argsort(all_fitnesses_arr)[:k]
+        top_k_solutions = all_solutions_arr[top_k_indices]
+
+        x0_cma = np.mean(top_k_solutions, axis=0)
+        if k > 1:
+            per_dim_std = np.std(top_k_solutions, axis=0)
+        else:
+            per_dim_std = np.full(n_active, 0.1)
+        per_dim_std = np.clip(per_dim_std, 0.01, 0.5)
+
+        sigma0 = float(np.median(per_dim_std))
+        if sigma0 < 1e-6:
+            sigma0 = 0.1
+        cma_stds = per_dim_std / sigma0
+
+        x0_cma = np.clip(x0_cma, 0.0, 1.0)
+
+        cma_opts = {
+            "bounds": [np.zeros(n_active).tolist(), np.ones(n_active).tolist()],
+            "seed": self.seed if self.seed != 0 else 1,
+            "verbose": -9,
+            "maxfevals": cma_budget,
+            "CMA_stds": cma_stds.tolist(),
+        }
+        es = cma.CMAEvolutionStrategy(x0_cma.tolist(), sigma0, cma_opts)
+
+        # Limit injected solutions to popsize to avoid pycma error.
+        inject_solutions = [s.tolist() for s in top_k_solutions[:es.popsize]]
+        es.inject(inject_solutions)
+
+        non_improve = 0
+
+        # Surrogate model for pre-screening candidates.
+        surrogate: Optional[FitnessSurrogate] = None
+        surr_X: List[np.ndarray] = []
+        surr_y: List[float] = []
+        surr_train_threshold = 500
+        surr_retrain_interval = 200
+        surr_last_train_count = 0
+        adsr_sweep_done = False
+
+        # Seed surrogate with TPE data.
+        if self.use_surrogate:
+            surr_X = list(all_solutions_arr)
+            surr_y = list(all_fitnesses_list)
+
+        current_render_dur = self._render_duration_for_eval(evaluations)
+
+        frozen_values = dict(self.freeze_indices)
+
+        pool = None
+        if self.n_workers > 1:
+            ctx = mp.get_context("fork")
+            pool = ctx.Pool(
+                processes=self.n_workers,
+                initializer=_mn_worker_init,
+                initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                          self.alpha, current_render_dur),
+            )
+
+        try:
+            while evaluations < self.budget:
+                if es.stop():
+                    break
+
+                new_render_dur = self._render_duration_for_eval(evaluations)
+                if new_render_dur != current_render_dur:
+                    current_render_dur = new_render_dur
+                    best_fitness = float("inf")
+                    non_improve = 0
+                    surr_X.clear()
+                    surr_y.clear()
+                    surrogate = None
+                    surr_last_train_count = 0
+                    adsr_sweep_done = False
+                    if pool is not None:
+                        pool.close()
+                        pool.join()
+                        ctx = mp.get_context("fork")
+                        pool = ctx.Pool(
+                            processes=self.n_workers,
+                            initializer=_mn_worker_init,
+                            initargs=(ref_set_data, self.fixed_kwargs, self.weights,
+                                      self.alpha, current_render_dur),
+                        )
+
+                solutions_norm = es.ask()
+                solutions_full = [
+                    _expand_vector(_denormalize(np.asarray(s)), act_idx, bounds_high)
+                    for s in solutions_norm
+                ]
+                if frozen_values:
+                    for sf in solutions_full:
+                        for fidx, fval in frozen_values.items():
+                            sf[fidx] = fval
+                solutions_full_list = [list(s) for s in solutions_full]
+
+                # Surrogate pre-screening.
+                eval_indices = list(range(len(solutions_norm)))
+                surr_predictions: Optional[np.ndarray] = None
+                if self.use_surrogate and surrogate is not None and surrogate.is_ready:
+                    norm_arr = np.array(solutions_norm, dtype=np.float64)
+                    surr_predictions = surrogate.predict(norm_arr)
+                    n_keep = max(1, len(solutions_norm) // 2)
+                    ranked = np.argsort(surr_predictions)
+                    eval_indices = sorted(ranked[:n_keep].tolist())
+
+                eval_full_list = [solutions_full_list[i] for i in eval_indices]
+                if pool is not None:
+                    eval_fitnesses = pool.map(_mn_worker_eval, eval_full_list)
+                else:
+                    eval_fitnesses = []
+                    for s in eval_full_list:
+                        x = np.asarray(s, dtype=np.float64)
+                        params = decode_params(x, self.fixed_kwargs)
+                        try:
+                            f = float(multi_note_fitness(
+                                params, self.ref_set,
+                                weights=self.weights,
+                                alpha=self.alpha,
+                                chip_model=chip_model,
+                                render_duration_s=current_render_dur,
+                            ))
+                        except Exception:
+                            f = 1e6
+                        eval_fitnesses.append(f)
+
+                fitnesses = [0.0] * len(solutions_norm)
+                eval_map = dict(zip(eval_indices, eval_fitnesses))
+                for i in range(len(solutions_norm)):
+                    if i in eval_map:
+                        fitnesses[i] = eval_map[i]
+                    elif surr_predictions is not None:
+                        fitnesses[i] = float(surr_predictions[i])
+                    else:
+                        fitnesses[i] = 1e6
+
+                es.tell(solutions_norm, fitnesses)
+
+                # Accumulate data for surrogate training.
+                if self.use_surrogate:
+                    for i in eval_indices:
+                        surr_X.append(np.asarray(solutions_norm[i], dtype=np.float64))
+                        surr_y.append(eval_map[i])
+                    total_surr = len(surr_y)
+                    if total_surr >= surr_train_threshold and (
+                        surrogate is None
+                        or total_surr - surr_last_train_count >= surr_retrain_interval
+                    ):
+                        if surrogate is None:
+                            surrogate = FitnessSurrogate(input_dim=n_active)
+                        surrogate.fit(np.array(surr_X), np.array(surr_y))
+                        surr_last_train_count = total_surr
+
+                        if not adsr_sweep_done and surrogate.is_ready:
+                            adsr_sweep_done = True
+                            best_x_red = _reduce_vector(best_x_full, act_idx)
+                            best_x_norm_current = _normalize(best_x_red)
+                            adsr_candidates = _surrogate_adsr_sweep(
+                                surrogate, best_x_norm_current, act_idx,
+                                lo_red, hi_red, top_n=20,
+                            )
+                            n_verify = min(5, adsr_candidates.shape[0])
+                            chip_model_sweep = self.fixed_kwargs.get("chip_model")
+                            for ci in range(n_verify):
+                                cand_norm = adsr_candidates[ci]
+                                cand_red = _denormalize(cand_norm)
+                                cand_full = _expand_vector(cand_red, act_idx, bounds_high)
+                                if frozen_values:
+                                    for fidx, fval in frozen_values.items():
+                                        cand_full[fidx] = fval
+                                cand_params = decode_params(cand_full, self.fixed_kwargs)
+                                try:
+                                    cand_fitness = float(multi_note_fitness(
+                                        cand_params, self.ref_set,
+                                        weights=self.weights,
+                                        alpha=self.alpha,
+                                        chip_model=chip_model_sweep,
+                                        render_duration_s=current_render_dur,
+                                    ))
+                                except Exception:
+                                    cand_fitness = 1e6
+                                evaluations += 1
+                                surr_X.append(cand_norm.copy())
+                                surr_y.append(cand_fitness)
+                                if cand_fitness < best_fitness - 1e-9:
+                                    best_fitness = cand_fitness
+                                    best_x_full = cand_full.copy()
+                                    non_improve = 0
+                                    es.inject([cand_norm.tolist()])
+
+                evaluations += len(eval_fitnesses)
+                gen_best = float(min(fitnesses))
+                gen_best_idx = int(np.argmin(fitnesses))
+                if gen_best < best_fitness - 1e-9:
+                    best_fitness = gen_best
+                    best_x_full = np.asarray(solutions_full_list[gen_best_idx], dtype=np.float64)
+                    non_improve = 0
+                else:
+                    non_improve += len(fitnesses)
+                history.append(best_fitness)
+
+                if self.log_interval > 0 and (
+                    evaluations // self.log_interval
+                    != (evaluations - len(fitnesses)) // self.log_interval
+                ):
+                    elapsed = time.time() - t0
+                    print(
+                        f"[optim-mn-tpe+cma/cma] evals={evaluations}/{self.budget} "
                         f"best={best_fitness:.4f} dims={n_active}/{N_DIMS} t={elapsed:.1f}s",
                         flush=True,
                     )
