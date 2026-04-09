@@ -283,6 +283,9 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
 
     Continuous values are clipped-and-rounded to the appropriate integer
     range. Gate and release frames are computed from ADSR timing.
+
+    If ``fixed_kwargs`` contains ``_min_gate_frames``, the computed
+    ``gate_frames`` is clamped from below to that value.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
     if x.size != N_DIMS:
@@ -312,6 +315,9 @@ def decode_params(x: np.ndarray, fixed_kwargs: Mapping) -> SidParams:
 
     # Compute ADSR-aware gate/release frames
     gate_frames, release_frames = compute_render_duration(attack, decay, sustain, release)
+    _min_gf = fixed_kwargs.get("_min_gate_frames")
+    if _min_gf is not None and gate_frames < int(_min_gf):
+        gate_frames = int(_min_gf)
 
     # Resolve waveform aliases
     wt_sustain_waveform = str(kwargs.get("wt_sustain_waveform", kwargs.get("waveform", "saw")))
@@ -629,6 +635,8 @@ class Optimizer:
         optimizer_backend: str = "cma",
         sensitivity_screen: bool = False,
         freeze_indices: Optional[dict] = None,
+        adsr_bound_overrides: Optional[dict] = None,
+        min_gate_frames: Optional[int] = None,
     ) -> None:
         self.use_surrogate = bool(use_surrogate)
         self.optimizer_backend = optimizer_backend
@@ -650,6 +658,13 @@ class Optimizer:
         # freeze_indices: dict mapping full-vector index -> fixed original-scale value.
         # These dimensions are excluded from CMA-ES and injected during decode.
         self.freeze_indices = dict(freeze_indices) if freeze_indices else {}
+        # adsr_bound_overrides: dict mapping ADSR index -> (lo, hi) to constrain
+        # the search space for instrument-type profiles.
+        self.adsr_bound_overrides = dict(adsr_bound_overrides) if adsr_bound_overrides else {}
+        # min_gate_frames: floor for gate_frames (e.g., 100 for piano).
+        self.min_gate_frames = int(min_gate_frames) if min_gate_frames is not None else None
+        if self.min_gate_frames is not None:
+            self.fixed_kwargs["_min_gate_frames"] = self.min_gate_frames
 
         # Load reference audio and features.
         if ref_fv is not None:
@@ -676,6 +691,16 @@ class Optimizer:
             self.ref_fv = extract(audio, sr)
         else:
             raise ValueError("must provide ref_fv, ref_wav_path, or ref_audio+ref_sr")
+
+    def _effective_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (bounds_low, bounds_high) with ADSR overrides applied."""
+        bl = BOUNDS_LOW.copy()
+        bh = BOUNDS_HIGH.copy()
+        bh[0] = min(float(self.max_attack), bh[0])
+        for idx, (lo, hi) in self.adsr_bound_overrides.items():
+            bl[idx] = max(float(lo), bl[idx])
+            bh[idx] = min(float(hi), bh[idx])
+        return bl, bh
 
     def _render_duration_for_eval(self, eval_count: int) -> Optional[float]:
         """Return the render duration in seconds for the current eval count.
@@ -854,8 +879,7 @@ class Optimizer:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         t0 = time.time()
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         act_idx = active_params(self.fixed_kwargs)
         # Apply caller-provided freeze_indices.
@@ -863,7 +887,7 @@ class Optimizer:
             act_idx = [i for i in act_idx if i not in self.freeze_indices]
         n_active = len(act_idx)
 
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
         range_red = hi_red - lo_red
         range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -873,7 +897,7 @@ class Optimizer:
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        best_x_full: np.ndarray = (0.5 * (bounds_low + bounds_high)).copy()
         # Inject frozen values into x0.
         for fidx, fval in self.freeze_indices.items():
             best_x_full[fidx] = fval
@@ -904,7 +928,7 @@ class Optimizer:
                 name = _PARAM_NAMES[orig_i]
                 if orig_i in _INTEGER_PARAM_INDICES:
                     val = trial.suggest_int(
-                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                        name, int(bounds_low[orig_i]), int(bounds_high[orig_i])
                     )
                     x_red[i] = float(val)
                 else:
@@ -1026,9 +1050,7 @@ class Optimizer:
 
     def _run_cma(self) -> OptimizerResult:
         t0 = time.time()
-        # Build local bounds with max_attack constraint.
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         # Determine active parameter indices for this combo.
         act_idx = active_params(self.fixed_kwargs)
@@ -1040,7 +1062,7 @@ class Optimizer:
         n_active = len(act_idx)
 
         # Build reduced bounds for CMA-ES (only active dimensions).
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
 
         # Normalization helpers: CMA-ES operates in [0,1] hypercube.
@@ -1055,9 +1077,9 @@ class Optimizer:
 
         # Start from caller-provided x0 or the mid-range point.
         if self.x0 is not None:
-            x0_full = np.clip(self.x0, BOUNDS_LOW, bounds_high)
+            x0_full = np.clip(self.x0, bounds_low, bounds_high)
         else:
-            x0_full = 0.5 * (BOUNDS_LOW + bounds_high)
+            x0_full = 0.5 * (bounds_low + bounds_high)
         # Inject frozen values into x0_full so they propagate correctly.
         for fidx, fval in self.freeze_indices.items():
             x0_full[fidx] = fval
@@ -1086,7 +1108,7 @@ class Optimizer:
                     del act_idx[pos]
                 n_active = len(act_idx)
                 # Rebuild reduced bounds and normalization.
-                lo_red = BOUNDS_LOW[act_idx]
+                lo_red = bounds_low[act_idx]
                 hi_red = bounds_high[act_idx]
                 range_red = hi_red - lo_red
                 range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -1409,15 +1431,14 @@ class Optimizer:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         t0 = time.time()
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         act_idx = active_params(self.fixed_kwargs)
         if self.freeze_indices:
             act_idx = [i for i in act_idx if i not in self.freeze_indices]
         n_active = len(act_idx)
 
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
         range_red = hi_red - lo_red
         range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -1433,7 +1454,7 @@ class Optimizer:
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        best_x_full: np.ndarray = (0.5 * (bounds_low + bounds_high)).copy()
         for fidx, fval in self.freeze_indices.items():
             best_x_full[fidx] = fval
         evaluations = 0
@@ -1466,7 +1487,7 @@ class Optimizer:
                 name = _PARAM_NAMES[orig_i]
                 if orig_i in _INTEGER_PARAM_INDICES:
                     val = trial.suggest_int(
-                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                        name, int(bounds_low[orig_i]), int(bounds_high[orig_i])
                     )
                     x_red[i] = float(val)
                 else:
@@ -1940,6 +1961,8 @@ class MultiNoteOptimizer:
         optimizer_backend: str = "cma",
         sensitivity_screen: bool = False,
         freeze_indices: Optional[dict] = None,
+        adsr_bound_overrides: Optional[dict] = None,
+        min_gate_frames: Optional[int] = None,
     ) -> None:
         self.use_surrogate = bool(use_surrogate)
         self.optimizer_backend = optimizer_backend
@@ -1959,6 +1982,20 @@ class MultiNoteOptimizer:
         self.onset_window_s = float(onset_window_s)
         self.warm_start = bool(warm_start)
         self.freeze_indices = dict(freeze_indices) if freeze_indices else {}
+        self.adsr_bound_overrides = dict(adsr_bound_overrides) if adsr_bound_overrides else {}
+        self.min_gate_frames = int(min_gate_frames) if min_gate_frames is not None else None
+        if self.min_gate_frames is not None:
+            self.fixed_kwargs["_min_gate_frames"] = self.min_gate_frames
+
+    def _effective_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (bounds_low, bounds_high) with ADSR overrides applied."""
+        bl = BOUNDS_LOW.copy()
+        bh = BOUNDS_HIGH.copy()
+        bh[0] = min(float(self.max_attack), bh[0])
+        for idx, (lo, hi) in self.adsr_bound_overrides.items():
+            bl[idx] = max(float(lo), bl[idx])
+            bh[idx] = min(float(hi), bh[idx])
+        return bl, bh
 
     def _render_duration_for_eval(self, eval_count: int) -> Optional[float]:
         """Return the render duration in seconds for the current eval count."""
@@ -2122,8 +2159,7 @@ class MultiNoteOptimizer:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         act_idx = active_params(self.fixed_kwargs)
         # Apply caller-provided freeze_indices.
@@ -2131,7 +2167,7 @@ class MultiNoteOptimizer:
             act_idx = [i for i in act_idx if i not in self.freeze_indices]
         n_active = len(act_idx)
 
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
         range_red = hi_red - lo_red
         range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -2141,7 +2177,7 @@ class MultiNoteOptimizer:
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        best_x_full: np.ndarray = (0.5 * (bounds_low + bounds_high)).copy()
         # Inject frozen values into x0.
         for fidx, fval in self.freeze_indices.items():
             best_x_full[fidx] = fval
@@ -2171,7 +2207,7 @@ class MultiNoteOptimizer:
                 name = _PARAM_NAMES[orig_i]
                 if orig_i in _INTEGER_PARAM_INDICES:
                     val = trial.suggest_int(
-                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                        name, int(bounds_low[orig_i]), int(bounds_high[orig_i])
                     )
                     x_red[i] = float(val)
                 else:
@@ -2292,9 +2328,7 @@ class MultiNoteOptimizer:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
-        # Build local bounds with max_attack constraint.
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         # Determine active parameter indices for this combo.
         act_idx = active_params(self.fixed_kwargs)
@@ -2304,7 +2338,7 @@ class MultiNoteOptimizer:
         n_active = len(act_idx)
 
         # Build reduced bounds for CMA-ES (only active dimensions).
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
 
         # Normalization helpers: CMA-ES operates in [0,1] hypercube.
@@ -2319,9 +2353,9 @@ class MultiNoteOptimizer:
 
         # Start from caller-provided x0 or the mid-range point.
         if self.x0 is not None:
-            x0_full = np.clip(self.x0, BOUNDS_LOW, bounds_high)
+            x0_full = np.clip(self.x0, bounds_low, bounds_high)
         else:
-            x0_full = 0.5 * (BOUNDS_LOW + bounds_high)
+            x0_full = 0.5 * (bounds_low + bounds_high)
         # Inject frozen values into x0_full.
         for fidx, fval in self.freeze_indices.items():
             x0_full[fidx] = fval
@@ -2342,7 +2376,7 @@ class MultiNoteOptimizer:
                 for pos in sorted(freeze_positions, reverse=True):
                     del act_idx[pos]
                 n_active = len(act_idx)
-                lo_red = BOUNDS_LOW[act_idx]
+                lo_red = bounds_low[act_idx]
                 hi_red = bounds_high[act_idx]
                 range_red = hi_red - lo_red
                 range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -2671,15 +2705,14 @@ class MultiNoteOptimizer:
         from .multi_note import multi_note_fitness
 
         t0 = time.time()
-        bounds_high = BOUNDS_HIGH.copy()
-        bounds_high[0] = min(float(self.max_attack), BOUNDS_HIGH[0])
+        bounds_low, bounds_high = self._effective_bounds()
 
         act_idx = active_params(self.fixed_kwargs)
         if self.freeze_indices:
             act_idx = [i for i in act_idx if i not in self.freeze_indices]
         n_active = len(act_idx)
 
-        lo_red = BOUNDS_LOW[act_idx]
+        lo_red = bounds_low[act_idx]
         hi_red = bounds_high[act_idx]
         range_red = hi_red - lo_red
         range_red_safe = np.where(range_red > 0, range_red, 1.0)
@@ -2695,7 +2728,7 @@ class MultiNoteOptimizer:
 
         history: List[float] = []
         best_fitness = float("inf")
-        best_x_full: np.ndarray = (0.5 * (BOUNDS_LOW + bounds_high)).copy()
+        best_x_full: np.ndarray = (0.5 * (bounds_low + bounds_high)).copy()
         for fidx, fval in self.freeze_indices.items():
             best_x_full[fidx] = fval
         evaluations = 0
@@ -2728,7 +2761,7 @@ class MultiNoteOptimizer:
                 name = _PARAM_NAMES[orig_i]
                 if orig_i in _INTEGER_PARAM_INDICES:
                     val = trial.suggest_int(
-                        name, int(BOUNDS_LOW[orig_i]), int(bounds_high[orig_i])
+                        name, int(bounds_low[orig_i]), int(bounds_high[orig_i])
                     )
                     x_red[i] = float(val)
                 else:
