@@ -42,9 +42,11 @@ from .optimize import (
     OptimizerResult,
     sid_params_to_dict,
     sid_params_from_dict,
+    load_reference_audio,
 )
 from .grid_search import grid_search, grid_search_multi_note
 from .multi_note import ReferenceSet
+from .perceptual import rerank_with_zimtohrli, _is_available as _zimtohrli_available
 from .render import render_pyresid, SidParams
 from .features import CANONICAL_SR
 from .encoders.raw_asm import encode_raw_asm
@@ -127,6 +129,7 @@ def _run_match_single_chip(
     work_dir: Path,
     args: argparse.Namespace,
     chip_model: str,
+    perceptual_rerank: bool = False,
 ) -> OptimizerResult:
     """Run the full match pipeline for a single chip model.
 
@@ -159,6 +162,27 @@ def _run_match_single_chip(
         three_phase=getattr(args, "three_phase", True),
         adsr_budget=getattr(args, "adsr_budget", 500),
     )
+
+    # --- Optional perceptual re-ranking with Zimtohrli ---
+    if perceptual_rerank and len(grid_results) > 1:
+        print(
+            f"[cli] [{chip_model}] Perceptual re-ranking {len(grid_results)} "
+            f"candidates with Zimtohrli...",
+            flush=True,
+        )
+        ref_audio, ref_sr = load_reference_audio(sample_path)
+        ranked = rerank_with_zimtohrli(
+            grid_results, ref_audio, ref_sr,
+            chip_model=chip_model, top_k=len(grid_results),
+        )
+        for i, (res, zdist) in enumerate(ranked):
+            print(
+                f"[cli] [{chip_model}]   #{i+1}: spectral_fitness="
+                f"{res.best_fitness:.4f}  zimtohrli_dist={zdist:.4f}",
+                flush=True,
+            )
+        # Re-order grid_results by Zimtohrli ranking.
+        grid_results = [res for res, _zdist in ranked]
 
     result = grid_results[0]
     best_combo = {
@@ -283,7 +307,7 @@ def _run_match_multi_note_chip(
 def cmd_match(args: argparse.Namespace) -> int:
     # Validate optimizer backend early.
     optimizer_backend = getattr(args, "optimizer", "cma")
-    if optimizer_backend == "tpe":
+    if optimizer_backend in ("tpe", "tpe+cma"):
         try:
             import optuna  # noqa: F401
         except ImportError:
@@ -292,6 +316,14 @@ def cmd_match(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if getattr(args, "perceptual_rerank", False) and not _zimtohrli_available():
+        print(
+            "warning: --perceptual-rerank requested but zimtohrli is not "
+            "installed; re-ranking will be skipped. "
+            "Install with: pip install zimtohrli",
+            file=sys.stderr,
+        )
 
     reference_set_path = getattr(args, "reference_set", None)
 
@@ -334,6 +366,7 @@ def cmd_match(args: argparse.Namespace) -> int:
         chips = list(CHIP_MODELS)
 
     parallel_chips = getattr(args, "parallel_chips", False) and len(chips) > 1
+    perceptual_rerank = getattr(args, "perceptual_rerank", False)
 
     results: dict[str, OptimizerResult] = {}
 
@@ -369,6 +402,7 @@ def cmd_match(args: argparse.Namespace) -> int:
                     fut = executor.submit(
                         _run_match_single_chip,
                         sample_path, chip_work_dir, chip_args, chip,
+                        perceptual_rerank,
                     )
                 futures[fut] = chip
 
@@ -395,7 +429,10 @@ def cmd_match(args: argparse.Namespace) -> int:
             if ref_set is not None:
                 result = _run_match_multi_note_chip(ref_set, chip_work_dir, args, chip)
             else:
-                result = _run_match_single_chip(sample_path, chip_work_dir, args, chip)
+                result = _run_match_single_chip(
+                    sample_path, chip_work_dir, args, chip,
+                    perceptual_rerank=perceptual_rerank,
+                )
             results[chip] = result
 
     # Print summary comparing chips.
@@ -856,12 +893,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="maximum ADSR attack value (0-15, default: 15)")
     m.add_argument("--source-instrument", default=None,
                    help="free-text description of the reference recording")
-    m.add_argument("--optimizer", default="cma", choices=["cma", "tpe"],
-                   help="optimizer backend: cma (CMA-ES, default) or tpe (Optuna TPE)")
+    m.add_argument("--optimizer", default="cma", choices=["cma", "tpe", "tpe+cma"],
+                   help="optimizer backend: cma (CMA-ES, default), tpe (Optuna TPE), or tpe+cma (TPE then CMA-ES refinement)")
     m.add_argument("--three-phase", default=True, action=argparse.BooleanOptionalAction,
                    help="use three-phase hierarchical optimization (default: True)")
     m.add_argument("--adsr-budget", type=int, default=500,
                    help="evaluation budget for Phase 2 ADSR sweep per combo (default: 500)")
+    m.add_argument("--perceptual-rerank", default=False, action=argparse.BooleanOptionalAction,
+                   help="re-rank top candidates using Zimtohrli perceptual metric (default: False)")
     m.set_defaults(func=cmd_match)
 
     e = sub.add_parser("export", help="export work-dir result to instruments/")

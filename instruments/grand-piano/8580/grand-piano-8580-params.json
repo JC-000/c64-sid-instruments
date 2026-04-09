@@ -1,37 +1,50 @@
 {
   "waveform": "saw",
-  "attack": 8,
-  "decay": 9,
-  "sustain": 12,
-  "release": 11,
-  "pulse_width": 1445,
+  "attack": 1,
+  "decay": 3,
+  "sustain": 0,
+  "release": 15,
+  "pulse_width": 3329,
   "pw_table": null,
-  "filter_cutoff": 510,
-  "filter_resonance": 0,
-  "filter_mode": "lp",
-  "filter_voice1": true,
+  "filter_cutoff": 44,
+  "filter_resonance": 8,
+  "filter_mode": "off",
+  "filter_voice1": false,
   "ring_mod": false,
   "sync": false,
   "frequency": 440.0,
-  "gate_frames": 47,
-  "release_frames": 125,
+  "gate_frames": 10,
+  "release_frames": 250,
   "wavetable": null,
   "volume": 15,
   "chip_model": "8580",
   "source_instrument": null,
-  "wt_attack_frames": 1,
-  "wt_attack_waveform": "pulse+saw",
+  "wt_attack_frames": 5,
+  "wt_attack_waveform": "triangle",
   "wt_sustain_waveform": "saw",
-  "wt_use_test_bit": true,
-  "pw_start": 1445,
-  "pw_delta": -37,
-  "pw_min": 185,
-  "pw_max": 3620,
+  "wt_use_test_bit": false,
+  "pw_start": 3329,
+  "pw_delta": -3,
+  "pw_min": 442,
+  "pw_max": 4095,
   "pw_mode": "sweep",
-  "wavetable_steps": null,
-  "filter_cutoff_start": 510,
-  "filter_cutoff_end": 25,
-  "filter_sweep_frames": 26,
+  "wavetable_steps": [
+    [
+      "triangle",
+      3
+    ],
+    [
+      "pulse",
+      5
+    ],
+    [
+      "saw",
+      0
+    ]
+  ],
+  "filter_cutoff_start": 44,
+  "filter_cutoff_end": 44,
+  "filter_sweep_frames": 50,
   "reference_notes": [
     {
       "note": "C3",
@@ -70,6 +83,6 @@
       "freq_hz": 523.25
     }
   ],
-  "fitness_score": 0.4884,
-  "version": 13
+  "fitness_score": 0.0,
+  "version": 14
 }
