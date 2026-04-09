@@ -46,6 +46,9 @@ DEFAULT_WEIGHTS: dict = {
     "adsr": 1.0,
     "log_mel": 3.0,
     "envelope_delta": 0.5,
+    "onset_spectral": 2.0,
+    "mfcc": 1.5,
+    "spectral_convergence": 1.5,
 }
 
 
@@ -140,6 +143,91 @@ def _log_mel_mse(ref_mel: tuple | None, cand_mel: tuple | None) -> float:
     return total / n_scales
 
 
+def _onset_spectral_distance(ref: FeatureVec, cand: FeatureVec) -> float:
+    """Onset-weighted log-mel MSE, scaled by the reference onset flux ratio.
+
+    If both onset_log_mel are None (e.g. from extract_lite), returns 0.
+    The onset flux ratio acts as an adaptive weight: sharp transients
+    (piano, guitar) produce a high ratio, amplifying onset mismatch.
+    Smooth onsets (violin, organ) produce a low ratio, reducing onset weight.
+    """
+    if ref.onset_log_mel is None or cand.onset_log_mel is None:
+        return 0.0
+    # Use the max of both onset energy ratios as the adaptive multiplier.
+    # max() keeps the asymmetric intent (sharp transient in either signal
+    # amplifies onset mismatch) while ensuring distance(a,b) == distance(b,a).
+    # Clamp to [0, 4] to prevent extreme amplification from very sharp
+    # transients (the ratio can reach 10x+), keeping the component O(1).
+    onset_ratio = min(max(ref.onset_energy_ratio, cand.onset_energy_ratio, 0.0), 4.0)
+    if onset_ratio < 1e-6:
+        return 0.0
+
+    n_scales = min(len(ref.onset_log_mel), len(cand.onset_log_mel))
+    if n_scales == 0:
+        return 0.0
+
+    total_mse = 0.0
+    for i in range(n_scales):
+        r = np.asarray(ref.onset_log_mel[i], dtype=np.float64)
+        c = np.asarray(cand.onset_log_mel[i], dtype=np.float64)
+        t = min(r.shape[1], c.shape[1])
+        if t == 0:
+            continue
+        r = r[:, :t]
+        c = c[:, :t]
+        mse = float(np.mean((r - c) ** 2))
+        var_r = float(np.var(r))
+        var_c = float(np.var(c))
+        norm = max((var_r + var_c) / 2.0, 1e-12)
+        total_mse += min(mse / norm, 4.0)
+    avg_mse = total_mse / n_scales
+
+    return float(onset_ratio * avg_mse)
+
+
+def _mfcc_distance(ref: FeatureVec, cand: FeatureVec) -> float:
+    """Cosine distance between mean MFCC vectors.
+
+    MFCCs are averaged across all frames to produce a single 13-D vector
+    per signal, then compared via cosine distance.
+    Returns 0.0 if either MFCC is None (e.g. from extract_lite).
+    """
+    if ref.mfcc is None or cand.mfcc is None:
+        return 0.0
+    ref_mean = np.mean(ref.mfcc, axis=1)
+    cand_mean = np.mean(cand.mfcc, axis=1)
+    return _cosine_distance(ref_mean, cand_mean)
+
+
+def _spectral_convergence_distance(ref: FeatureVec, cand: FeatureVec) -> float:
+    """Frobenius norm ratio: ||S_ref - S_cand||_F / ||S_ref||_F.
+
+    This emphasizes frequency bins where the reference has energy,
+    unlike MSE which weights all bins equally.
+    Returns 0.0 if either STFT is None.
+    """
+    if ref.stft_mag is None or cand.stft_mag is None:
+        return 0.0
+    r = np.asarray(ref.stft_mag, dtype=np.float64)
+    c = np.asarray(cand.stft_mag, dtype=np.float64)
+    # Align time axes to the shorter one
+    t = min(r.shape[1], c.shape[1])
+    if t == 0:
+        return 0.0
+    r = r[:, :t]
+    c = c[:, :t]
+    # Use average of both norms in denominator for symmetry:
+    # distance(a, b) == distance(b, a)
+    ref_norm = float(np.linalg.norm(r, 'fro'))
+    cand_norm = float(np.linalg.norm(c, 'fro'))
+    avg_norm = (ref_norm + cand_norm) / 2.0
+    if avg_norm < 1e-12:
+        return 0.0
+    diff_norm = float(np.linalg.norm(r - c, 'fro'))
+    # Clamp to [0, 4] to avoid extreme values
+    return float(min(diff_norm / avg_norm, 4.0))
+
+
 def _adsr_l1(ref: FeatureVec, cand: FeatureVec) -> float:
     # scale times by 1 s (typical envelopes are under a few seconds);
     # sustain level is already in [0,1].
@@ -214,6 +302,9 @@ def distance(
             np.diff(np.asarray(ref.amplitude_envelope, dtype=np.float64)),
             np.diff(np.asarray(cand.amplitude_envelope, dtype=np.float64)),
         ),
+        "onset_spectral": _onset_spectral_distance(ref, cand),
+        "mfcc": _mfcc_distance(ref, cand),
+        "spectral_convergence": _spectral_convergence_distance(ref, cand),
     }
 
     total = 0.0

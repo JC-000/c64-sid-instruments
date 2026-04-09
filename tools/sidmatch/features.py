@@ -56,6 +56,10 @@ class FeatureVec:
     fundamental_hz: float
     noisiness: float
     log_mel: Optional[tuple] = None  # tuple of 2D arrays (n_mels × n_frames), one per scale
+    onset_energy_ratio: float = 0.0  # spectral flux ratio: onset vs whole-note average
+    onset_log_mel: Optional[tuple] = None  # log-mel slices for onset region only
+    mfcc: Optional[np.ndarray] = None  # shape (13, n_frames) or None
+    stft_mag: Optional[np.ndarray] = None  # magnitude STFT for spectral convergence
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -341,6 +345,86 @@ def _compute_log_mel_specs(y: np.ndarray, sr: int, n_mels: int = 64) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Onset spectral flux and MFCC helpers
+# ---------------------------------------------------------------------------
+
+
+def _spectral_flux(S: np.ndarray) -> np.ndarray:
+    """Frame-to-frame L2 spectral change. Returns shape (n_frames,)."""
+    if S.shape[1] < 2:
+        return np.zeros(max(S.shape[1], 0), dtype=np.float64)
+    diff = np.diff(S, axis=1)
+    flux = np.sqrt(np.sum(diff ** 2, axis=0))
+    # Prepend 0 for the first frame so length matches n_frames
+    return np.concatenate([[0.0], flux])
+
+
+def _onset_features(y: np.ndarray, sr: int, n_mels: int = 64,
+                     onset_ms: float = 50.0) -> tuple:
+    """Compute onset energy ratio and onset log-mel spectrograms.
+
+    Returns (onset_energy_ratio, onset_log_mel_tuple).
+    onset_energy_ratio: spectral flux in the first onset_ms divided by
+                        whole-note average spectral flux.
+    onset_log_mel_tuple: tuple of 2-D arrays (n_mels, onset_frames) for
+                         each mel scale (512 and 2048 FFT).
+    """
+    onset_samples = int(sr * onset_ms / 1000.0)
+    if y.size < onset_samples or y.size < 512:
+        return 0.0, None
+
+    scales = [
+        (512, 256),
+        (2048, 512),
+    ]
+
+    # Compute spectral flux ratio using the fine-grained scale (512 FFT)
+    S_full = _stft_mag(y, n_fft=512, hop_length=256)
+    flux = _spectral_flux(S_full)
+    if flux.size == 0 or float(np.mean(flux)) < 1e-12:
+        onset_ratio = 0.0
+    else:
+        onset_frames_512 = max(1, onset_samples // 256)
+        onset_flux = float(np.mean(flux[:onset_frames_512])) if onset_frames_512 <= flux.size else float(np.mean(flux))
+        avg_flux = float(np.mean(flux))
+        onset_ratio = onset_flux / max(avg_flux, 1e-12)
+
+    # Compute onset log-mel for each scale
+    onset_mels = []
+    for n_fft, hop in scales:
+        onset_frames = max(1, onset_samples // hop)
+        S = _stft_mag(y, n_fft=n_fft, hop_length=hop)
+        # Take only onset frames
+        S_onset = S[:, :onset_frames]
+        fb = _mel_filterbank(sr, n_fft, n_mels)
+        mel_spec = fb @ S_onset
+        log_mel = np.log(np.maximum(mel_spec, 1e-4) + 1e-7)
+        onset_mels.append(log_mel.astype(np.float32))
+
+    return float(onset_ratio), tuple(onset_mels)
+
+
+def _compute_mfcc(y: np.ndarray, sr: int, n_mfcc: int = 13) -> np.ndarray:
+    """Compute MFCCs using the DCT of log-mel spectrogram.
+
+    Returns shape (n_mfcc, n_frames).
+    Uses scipy DCT to avoid librosa dependency for this step.
+    """
+    from scipy.fft import dct
+
+    # Use the 2048-FFT log-mel as the basis
+    S = _stft_mag(y, n_fft=2048, hop_length=512)
+    n_mels = 64
+    fb = _mel_filterbank(sr, 2048, n_mels)
+    mel_spec = fb @ S
+    log_mel = np.log(np.maximum(mel_spec, 1e-10) + 1e-7)
+
+    # DCT-II along the mel axis for each frame
+    mfcc = dct(log_mel, type=2, axis=0, norm='ortho')[:n_mfcc, :]
+    return mfcc.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
 # harmonic magnitudes (kept mostly as-is, but uses _fft_frequencies)
 # ---------------------------------------------------------------------------
 
@@ -594,6 +678,16 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
     # Multi-scale log-mel spectrograms.
     log_mel = _compute_log_mel_specs(y_trim, work_sr)
 
+    # Onset spectral features.
+    onset_ratio, onset_log_mel = _onset_features(y_trim, work_sr)
+
+    # MFCCs (13 coefficients per frame).
+    mfcc = _compute_mfcc(y_trim, work_sr)
+
+    # Magnitude STFT for spectral convergence (reuse the already-computed one).
+    # S_mag was computed with N_FFT and hop; store it for spectral convergence.
+    stft_mag_out = S_mag
+
     return FeatureVec(
         sr=work_sr,
         duration_s=duration_s,
@@ -609,4 +703,8 @@ def extract(audio: np.ndarray, sr: int, *, known_f0: Optional[float] = None) -> 
         fundamental_hz=float(f0),
         noisiness=noisiness,
         log_mel=log_mel,
+        onset_energy_ratio=onset_ratio,
+        onset_log_mel=onset_log_mel,
+        mfcc=mfcc,
+        stft_mag=stft_mag_out,
     )
