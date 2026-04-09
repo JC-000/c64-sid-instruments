@@ -387,7 +387,7 @@ def _onset_features(y: np.ndarray, sr: int, n_mels: int = 64,
         onset_frames_512 = max(1, onset_samples // 256)
         onset_flux = float(np.mean(flux[:onset_frames_512])) if onset_frames_512 <= flux.size else float(np.mean(flux))
         avg_flux = float(np.mean(flux))
-        onset_ratio = onset_flux / max(avg_flux, 1e-12)
+        onset_ratio = min(5.0, onset_flux / max(avg_flux, 1e-12))
 
     # Compute onset log-mel for each scale
     onset_mels = []
