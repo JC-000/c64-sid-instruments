@@ -1,0 +1,57 @@
+{
+  "piece": "Beethoven - Fur Elise (Bagatelle No. 25 in A minor, WoO 59)",
+  "composer": "Ludwig van Beethoven",
+  "license": "Public domain",
+  "passage": "Opening A-theme, mm. 1-8, right-hand melody only",
+  "time_signature": "3/8",
+  "tempo_bpm": 72,
+  "beat_unit": "eighth",
+  "subdivision": "sixteenth",
+  "comment": "Durations are in sixteenth notes (3/8 = 6 sixteenths per bar). Rests encoded as note=null. Frequencies are equal-tempered, A4=440.",
+  "notes": [
+    {"bar": 1, "note": "E5",  "duration_16ths": 1},
+    {"bar": 1, "note": "D#5", "duration_16ths": 1},
+    {"bar": 1, "note": "E5",  "duration_16ths": 1},
+    {"bar": 1, "note": "D#5", "duration_16ths": 1},
+    {"bar": 1, "note": "E5",  "duration_16ths": 1},
+    {"bar": 1, "note": "B4",  "duration_16ths": 1},
+
+    {"bar": 2, "note": "D5",  "duration_16ths": 1},
+    {"bar": 2, "note": "C5",  "duration_16ths": 1},
+    {"bar": 2, "note": "A4",  "duration_16ths": 2},
+    {"bar": 2, "note": null,  "duration_16ths": 2},
+
+    {"bar": 3, "note": "C4",  "duration_16ths": 1},
+    {"bar": 3, "note": "E4",  "duration_16ths": 1},
+    {"bar": 3, "note": "A4",  "duration_16ths": 2},
+    {"bar": 3, "note": "B4",  "duration_16ths": 2},
+
+    {"bar": 4, "note": "E4",  "duration_16ths": 1},
+    {"bar": 4, "note": "G#4", "duration_16ths": 1},
+    {"bar": 4, "note": "B4",  "duration_16ths": 2},
+    {"bar": 4, "note": "C5",  "duration_16ths": 2},
+
+    {"bar": 5, "note": "E4",  "duration_16ths": 1},
+    {"bar": 5, "note": "E5",  "duration_16ths": 1},
+    {"bar": 5, "note": "D#5", "duration_16ths": 1},
+    {"bar": 5, "note": "E5",  "duration_16ths": 1},
+    {"bar": 5, "note": "D#5", "duration_16ths": 1},
+    {"bar": 5, "note": "E5",  "duration_16ths": 1},
+
+    {"bar": 6, "note": "B4",  "duration_16ths": 1},
+    {"bar": 6, "note": "D5",  "duration_16ths": 1},
+    {"bar": 6, "note": "C5",  "duration_16ths": 1},
+    {"bar": 6, "note": "A4",  "duration_16ths": 3},
+
+    {"bar": 7, "note": null,  "duration_16ths": 2},
+    {"bar": 7, "note": "C4",  "duration_16ths": 1},
+    {"bar": 7, "note": "E4",  "duration_16ths": 1},
+    {"bar": 7, "note": "A4",  "duration_16ths": 2},
+
+    {"bar": 8, "note": "B4",  "duration_16ths": 2},
+    {"bar": 8, "note": "E4",  "duration_16ths": 1},
+    {"bar": 8, "note": "C5",  "duration_16ths": 1},
+    {"bar": 8, "note": "B4",  "duration_16ths": 1},
+    {"bar": 8, "note": "A4",  "duration_16ths": 1}
+  ]
+}
