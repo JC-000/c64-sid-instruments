@@ -166,6 +166,7 @@ def _run_match_single_chip(
         three_phase=getattr(args, "three_phase", True),
         adsr_budget=getattr(args, "adsr_budget", 500),
         instrument_profile=instrument_profile,
+        fitness_mode=getattr(args, "fitness", "mrstft"),
     )
 
     # --- Optional perceptual re-ranking with Zimtohrli ---
@@ -277,6 +278,7 @@ def _run_match_multi_note_chip(
         three_phase=getattr(args, "three_phase", True),
         adsr_budget=getattr(args, "adsr_budget", 500),
         instrument_profile=instrument_profile,
+        fitness_mode=getattr(args, "fitness", "mrstft"),
     )
 
     result = grid_results[0]
@@ -913,6 +915,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="evaluation budget for Phase 2 ADSR sweep per combo (default: 500)")
     m.add_argument("--perceptual-rerank", default=False, action=argparse.BooleanOptionalAction,
                    help="re-rank top candidates using Zimtohrli perceptual metric (default: False)")
+    m.add_argument("--fitness", default="mrstft", choices=["mrstft", "legacy"],
+                   help="fitness function: 'mrstft' (waveform MR-STFT log-mag, default) "
+                        "or 'legacy' (feature-based FeatureVec distance)")
     m.set_defaults(func=cmd_match)
 
     e = sub.add_parser("export", help="export work-dir result to instruments/")
