@@ -60,14 +60,26 @@ INSTRUMENT_PROFILES: dict = {
         "adsr_bounds": {
             "attack": (0, 2),    # fast attack (piano hammer is instant)
             "decay": (9, 15),    # long decay (piano rings for seconds)
-            "sustain": (0, 3),   # low sustain (piano always decays to silence)
+            # Sustain must stay high for a SID piano. A real piano tone
+            # decays gradually throughout the note, but in the SID ADSR
+            # model that slow decay is produced by the long *release*
+            # phase (or a slow gated decay from a high sustain level),
+            # NOT by a zero sustain level. With sustain=0 the envelope
+            # drops to silence the instant the decay phase finishes,
+            # which completely kills the note tail regardless of how
+            # many gate_frames/release_frames the renderer adds. The
+            # hand-tuned baselines (9ec6636) both use sustain=15 on 6581
+            # and 8580; we floor the search at 12 to leave the optimizer
+            # a little headroom without letting it collapse the note.
+            "sustain": (12, 15),
             "release": (3, 9),   # moderate release
         },
         # Override screening defaults for better Phase 1 ordering.
         "screening_defaults": {
             "attack": 0,
             "decay": 12,
-            "sustain": 0,
+            # Matches the raised sustain floor above (see comment).
+            "sustain": 12,
             "release": 6,
             "pw_start": 2048,
             "pw_delta": 4,
