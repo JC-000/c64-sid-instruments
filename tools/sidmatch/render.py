@@ -227,6 +227,33 @@ class SidParams:
     filter_cutoff_end: Optional[int] = None
     filter_sweep_frames: int = 0
 
+    # -- Phase 1 expressive primitives (Detert-style piano) --
+    # Per-frame waveform-register byte table. Each entry plays for
+    # ``waveform_table_hold_frames`` frames; the final entry holds for the
+    # remainder of the gate. Bytes are raw control-register waveform nibbles
+    # (e.g. 0x81 = noise+pulse). When None, falls back to
+    # ``waveform``/``wavetable_steps`` behaviour.
+    waveform_table: Optional[List[int]] = None
+    waveform_table_hold_frames: int = 1
+
+    # Hard restart: before the real note-on, write (test bit set, gate off,
+    # ADSR=0) for ``hard_restart_frames`` frames to reset the oscillator phase
+    # and defeat the SID ADSR bug. Then restore ADSR and gate on.
+    hard_restart: bool = False
+    hard_restart_frames: int = 2
+
+    # PWM LFO: when ``pwm_lfo_rate`` > 0, override the linear PW sweep with a
+    # sinusoidal LFO around ``effective_pw_start()`` with amplitude
+    # ``pwm_lfo_depth`` (in raw 12-bit PW units).
+    pwm_lfo_rate: float = 0.0
+    pwm_lfo_depth: int = 0
+
+    # Filter envelope table: list of cutoff values played one per
+    # ``filter_env_hold_frames`` frames. When None, falls back to the
+    # two-point linear filter sweep.
+    filter_env: Optional[List[int]] = None
+    filter_env_hold_frames: int = 1
+
     # ---- derived helpers ----
 
     def effective_sustain_waveform(self) -> str:
@@ -457,6 +484,13 @@ def render_pyresid(
     use_legacy_wt = bool(params.wavetable) and not params.wt_attack_waveform
     use_legacy_pw = bool(params.pw_table) and params.pw_start is None
 
+    # -- Phase 1 primitive flags --
+    use_wf_table = bool(params.waveform_table)
+    wf_table_hold = max(1, int(params.waveform_table_hold_frames))
+    use_pwm_lfo = params.pwm_lfo_rate > 0.0
+    use_filter_env = bool(params.filter_env)
+    filter_env_hold = max(1, int(params.filter_env_hold_frames))
+
     # Master volume / filter mode
     sid.write_register(
         WritableRegister.Filter_Mode_Vol, params.filter_mode_vol_byte()
@@ -506,8 +540,29 @@ def render_pyresid(
         wf = legacy_wt.get(f, _waveform_mask(params.waveform))
         return _build_control(wf, gate)
 
+    def _wf_from_byte(wf_byte: int, gate: bool) -> int:
+        """Apply ring/sync/gate bits to a raw waveform register byte.
+
+        The ``waveform_table`` entries already encode the waveform high
+        nibble; we only need to OR the control bits and (optionally) mask
+        off the low-nibble bits the caller didn't set.
+        """
+        cb = wf_byte & 0xF0
+        if params.ring_mod:
+            cb |= WF_RING_MOD
+        if params.sync:
+            cb |= WF_SYNC
+        if gate:
+            cb |= WF_GATE
+        return cb & 0xFF
+
     def _wf_for_frame(f: int, gate: bool) -> int:
         """Determine waveform control byte for frame f using wavetable sequence."""
+        if use_wf_table:
+            # Index advances every wf_table_hold frames; last entry holds.
+            idx = min(len(params.waveform_table) - 1, f // wf_table_hold)
+            return _wf_from_byte(params.waveform_table[idx], gate)
+
         if use_legacy_wt:
             return _wf_for_frame_legacy(f, gate)
 
@@ -526,6 +581,28 @@ def render_pyresid(
             return _build_control(attack_wf, gate)
         return _build_control(sustain_wf, gate)
 
+    # --- Hard restart (optional) ---
+    # Before gate-on, write TEST bit (no gate) + zero ADSR for N frames to
+    # reset oscillator phase and defeat the ADSR bug. Then restore ADSR and
+    # fall through to the normal gate-on loop.
+    if params.hard_restart:
+        hr_frames = max(1, int(params.hard_restart_frames))
+        sid.write_register(WritableRegister.Voice1_Attack_Decay, 0)
+        sid.write_register(WritableRegister.Voice1_Sustain_Release, 0)
+        sid.write_register(WritableRegister.Voice1_Control_Reg, WF_TEST)
+        for _ in range(hr_frames):
+            chunk = sid.clock(frame_dur)
+            samples.extend(chunk)
+        # Restore ADSR before gate-on so envelope starts correctly
+        sid.write_register(WritableRegister.Voice1_Attack_Decay, params.ad_byte())
+        sid.write_register(
+            WritableRegister.Voice1_Sustain_Release, params.sr_byte()
+        )
+
+    # Precompute PWM LFO time base
+    lfo_two_pi_rate = 2.0 * np.pi * params.pwm_lfo_rate  # rad/s
+    frame_sec = 1.0 / PAL_FRAME_HZ
+
     # --- Gate ON phase ---
     for f in range(params.gate_frames):
         # Update waveform
@@ -533,7 +610,16 @@ def render_pyresid(
         sid.write_register(WritableRegister.Voice1_Control_Reg, ctrl)
 
         # Update PW
-        if use_legacy_pw:
+        if use_pwm_lfo:
+            t = f * frame_sec
+            lfo_val = np.sin(lfo_two_pi_rate * t)
+            new_pw = int(round(pw_start + params.pwm_lfo_depth * lfo_val))
+            new_pw = max(0, min(4095, new_pw))
+            sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
+            sid.write_register(
+                WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
+            )
+        elif use_legacy_pw:
             if f in legacy_pw:
                 new_pw = legacy_pw[f] & 0x0FFF
                 sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
@@ -548,7 +634,11 @@ def render_pyresid(
             )
 
         # Update filter cutoff
-        new_cutoff = _compute_filter_cutoff_for_frame(f, cutoff_start, cutoff_end, sweep_frames)
+        if use_filter_env:
+            idx = min(len(params.filter_env) - 1, f // filter_env_hold)
+            new_cutoff = int(params.filter_env[idx]) & 0x07FF
+        else:
+            new_cutoff = _compute_filter_cutoff_for_frame(f, cutoff_start, cutoff_end, sweep_frames)
         sid.write_register(WritableRegister.Filter_Fc_Lo, new_cutoff & 0x07)
         sid.write_register(WritableRegister.Filter_Fc_Hi, (new_cutoff >> 3) & 0xFF)
 
@@ -556,25 +646,41 @@ def render_pyresid(
         samples.extend(chunk)
 
     # --- Gate OFF phase ---
-    if use_multistep:
-        gate_off_wf = multistep_sustain_wf
-    elif use_legacy_wt:
-        gate_off_wf = _waveform_mask(params.waveform)
+    if use_wf_table:
+        gate_off_ctrl = _wf_from_byte(params.waveform_table[-1], gate=False)
     else:
-        gate_off_wf = sustain_wf
-    gate_off_ctrl = _build_control(gate_off_wf, gate=False)
+        if use_multistep:
+            gate_off_wf = multistep_sustain_wf
+        elif use_legacy_wt:
+            gate_off_wf = _waveform_mask(params.waveform)
+        else:
+            gate_off_wf = sustain_wf
+        gate_off_ctrl = _build_control(gate_off_wf, gate=False)
     sid.write_register(WritableRegister.Voice1_Control_Reg, gate_off_ctrl)
 
     for f in range(params.release_frames):
         # Continue PW and filter sweeps during release
         abs_frame = params.gate_frames + f
-        if not use_legacy_pw:
+        if use_pwm_lfo:
+            t = abs_frame * frame_sec
+            lfo_val = np.sin(lfo_two_pi_rate * t)
+            new_pw = int(round(pw_start + params.pwm_lfo_depth * lfo_val))
+            new_pw = max(0, min(4095, new_pw))
+            sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
+            sid.write_register(
+                WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
+            )
+        elif not use_legacy_pw:
             new_pw = _compute_pw_for_frame(abs_frame, pw_start, pw_delta, pw_min, pw_max, pw_mode)
             sid.write_register(WritableRegister.Voice1_Pw_Lo, new_pw & 0xFF)
             sid.write_register(
                 WritableRegister.Voice1_Pw_Hi, (new_pw >> 8) & 0x0F
             )
-        new_cutoff = _compute_filter_cutoff_for_frame(abs_frame, cutoff_start, cutoff_end, sweep_frames)
+        if use_filter_env:
+            # Hold last entry through release
+            new_cutoff = int(params.filter_env[-1]) & 0x07FF
+        else:
+            new_cutoff = _compute_filter_cutoff_for_frame(abs_frame, cutoff_start, cutoff_end, sweep_frames)
         sid.write_register(WritableRegister.Filter_Fc_Lo, new_cutoff & 0x07)
         sid.write_register(WritableRegister.Filter_Fc_Hi, (new_cutoff >> 3) & 0xFF)
 

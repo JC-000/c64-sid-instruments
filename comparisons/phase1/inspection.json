@@ -1,0 +1,50 @@
+{
+  "handcraft_full": {
+    "label": "handcraft_full",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06125,
+    "peak": 0.27197,
+    "transient_peak_50ms": 0.27151,
+    "early_rms_200ms": 0.12284,
+    "late_rms_500ms": 0.01654,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0
+  },
+  "handcraft_no_hard_restart": {
+    "label": "no_hard_restart",
+    "samples": 1261440,
+    "duration_s": 28.604,
+    "rms": 0.06115,
+    "peak": 0.2825,
+    "transient_peak_50ms": 0.2735,
+    "early_rms_200ms": 0.12238,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0
+  },
+  "handcraft_no_waveform_table": {
+    "label": "no_waveform_table",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.09676,
+    "peak": 0.27762,
+    "transient_peak_50ms": 0.27762,
+    "early_rms_200ms": 0.14361,
+    "late_rms_500ms": 0.0272,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0
+  },
+  "handcraft_fur_elise": {
+    "label": "fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.29013,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.90729,
+    "early_rms_200ms": 0.39679,
+    "late_rms_500ms": 0.21128,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0
+  }
+}
