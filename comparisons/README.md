@@ -55,7 +55,7 @@ chip.
 |---|---|---|---|
 | `fur_elise_detert_6581.wav` | `instruments/reference-pianos/detert-piano/detert-piano-6581-params.json` | 6581 | Thomas Detert's manually-crafted piano params, reverse-engineered from `Ivory.sid` siddump analysis, rendered on their native 6581 chip. **This is the intended A/B pairing for Detert.** |
 | `fur_elise_detert_8580.wav` | `instruments/reference-pianos/detert-piano/detert-piano-6581-params.json` | 8580 | Same Detert params rendered through the 8580 instead of the 6581. **Cross-chip**: the Detert piano was designed for the 6581, so this is *not* the instrument's intended chip. Included purely for listening comparison so you can hear how the same params behave on the other SID revision; the canonical Detert reference is the 6581 file above. |
-| `fur_elise_ours_8580.wav` | `instruments/grand-piano/8580/grand-piano-8580-params.json` (HEAD) | 8580 | Our current best grand piano 8580: the v7/v8 baseline params restored in commit `9ec6636`, rendered through the click-fixed renderer from commit `ce6eba9`, on its native 8580 chip. |
+| `fur_elise_ours_8580.wav` | `instruments/grand-piano/8580/grand-piano-8580-params.json` (HEAD) | 8580 | Our current best grand piano 8580: the v7/v8 baseline params restored in commit `9ec6636`, rendered through the click-fixed renderer from commit `ce6eba9`, on its native 8580 chip. This WAV was regenerated after PR #25 re-restored the baseline params (A=2 D=6 S=15 R=12) that had been transiently clobbered on this branch by commit `db63b8f`. |
 
 ## What this A/B is evaluating
 
