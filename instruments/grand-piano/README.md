@@ -14,25 +14,25 @@ A SID chip instrument patch: grand-piano.
 
 | Parameter | Value |
 |---|---|
-| waveform | triangle |
-| attack | 6 |
-| decay | 15 |
-| sustain | 14 |
-| release | 9 |
-| pulse_width | 2048 |
-| pw_start | 2048 |
-| pw_delta | 0 |
+| waveform | pulse |
+| attack | 0 |
+| decay | 9 |
+| sustain | 0 |
+| release | 3 |
+| pulse_width | 1561 |
+| pw_start | 1561 |
+| pw_delta | 18 |
 | pw_mode | sweep |
-| filter_cutoff | 130 |
-| filter_cutoff_start | 130 |
-| filter_cutoff_end | 510 |
-| filter_sweep_frames | 1 |
+| filter_cutoff | 515 |
+| filter_cutoff_start | 515 |
+| filter_cutoff_end | 0 |
+| filter_sweep_frames | 9 |
 | filter_resonance | 15 |
 | filter_mode | lp |
 | filter_voice1 | True |
-| wt_attack_waveform | None |
-| wt_sustain_waveform | triangle |
-| wt_attack_frames | 2 |
+| wt_attack_waveform | noise |
+| wt_sustain_waveform | pulse |
+| wt_attack_frames | 1 |
 | wt_use_test_bit | False |
 | volume | 15 |
 
@@ -40,14 +40,14 @@ A SID chip instrument patch: grand-piano.
 
 | Parameter | Value |
 |---|---|
-| waveform | saw |
-| attack | 1 |
-| decay | 3 |
+| waveform | pulse |
+| attack | 0 |
+| decay | 9 |
 | sustain | 0 |
-| release | 15 |
-| pulse_width | 3329 |
-| pw_start | 3329 |
-| pw_delta | -3 |
+| release | 9 |
+| pulse_width | 6 |
+| pw_start | 6 |
+| pw_delta | -28 |
 | pw_mode | sweep |
 | filter_cutoff | 44 |
 | filter_cutoff_start | 44 |
@@ -56,10 +56,10 @@ A SID chip instrument patch: grand-piano.
 | filter_resonance | 8 |
 | filter_mode | off |
 | filter_voice1 | False |
-| wt_attack_waveform | triangle |
-| wt_sustain_waveform | saw |
+| wt_attack_waveform | noise |
+| wt_sustain_waveform | pulse |
 | wt_attack_frames | 5 |
-| wt_use_test_bit | False |
+| wt_use_test_bit | True |
 | volume | 15 |
 
 ## Tags
