@@ -53,7 +53,8 @@ chip.
 
 | File | Params source | Chip | What it represents |
 |---|---|---|---|
-| `fur_elise_detert_6581.wav` | `instruments/reference-pianos/detert-piano/detert-piano-6581-params.json` | 6581 | Thomas Detert's manually-crafted piano params, reverse-engineered from `Ivory.sid` siddump analysis, rendered on their native 6581 chip. |
+| `fur_elise_detert_6581.wav` | `instruments/reference-pianos/detert-piano/detert-piano-6581-params.json` | 6581 | Thomas Detert's manually-crafted piano params, reverse-engineered from `Ivory.sid` siddump analysis, rendered on their native 6581 chip. **This is the intended A/B pairing for Detert.** |
+| `fur_elise_detert_8580.wav` | `instruments/reference-pianos/detert-piano/detert-piano-6581-params.json` | 8580 | Same Detert params rendered through the 8580 instead of the 6581. **Cross-chip**: the Detert piano was designed for the 6581, so this is *not* the instrument's intended chip. Included purely for listening comparison so you can hear how the same params behave on the other SID revision; the canonical Detert reference is the 6581 file above. |
 | `fur_elise_ours_8580.wav` | `instruments/grand-piano/8580/grand-piano-8580-params.json` (HEAD) | 8580 | Our current best grand piano 8580: the v7/v8 baseline params restored in commit `9ec6636`, rendered through the click-fixed renderer from commit `ce6eba9`, on its native 8580 chip. |
 
 ## What this A/B is evaluating
@@ -88,6 +89,13 @@ python3 tools/render_fur_elise.py \
     --notes comparisons/fur_elise_notes.json \
     --chip 6581 \
     --out comparisons/fur_elise_detert_6581.wav
+
+# Cross-chip: same Detert params through the 8580 (listening-only).
+python3 tools/render_fur_elise.py \
+    --params instruments/reference-pianos/detert-piano/detert-piano-6581-params.json \
+    --notes comparisons/fur_elise_notes.json \
+    --chip 8580 \
+    --out comparisons/fur_elise_detert_8580.wav
 
 python3 tools/render_fur_elise.py \
     --params instruments/grand-piano/8580/grand-piano-8580-params.json \
