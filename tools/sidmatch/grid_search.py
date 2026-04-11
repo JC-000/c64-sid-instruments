@@ -388,6 +388,7 @@ def grid_search(
     three_phase: bool = True,
     adsr_budget: int = 500,
     instrument_profile: Optional[dict] = None,
+    fitness_mode: str = "mrstft",
 ) -> List[OptimizerResult]:
     """Grid search: screen all combos, then refine top K.
 
@@ -545,6 +546,7 @@ def grid_search(
                 freeze_indices=freeze,
                 adsr_bound_overrides=adsr_bound_overrides,
                 min_gate_frames=min_gate_frames,
+                fitness_mode=fitness_mode,
             )
             res = opt.run()
 
@@ -664,6 +666,7 @@ def grid_search(
                     freeze_indices=adsr_freeze,
                     adsr_bound_overrides=adsr_bound_overrides,
                     min_gate_frames=min_gate_frames,
+                    fitness_mode=fitness_mode,
                 )
                 res = opt.run()
 
@@ -833,6 +836,7 @@ def grid_search(
                     optimizer_backend=optimizer_backend,
                     adsr_bound_overrides=adsr_bound_overrides,
                     min_gate_frames=min_gate_frames,
+                    fitness_mode=fitness_mode,
                 )
                 res = opt.run()
 
@@ -986,6 +990,7 @@ def grid_search_multi_note(
     three_phase: bool = True,
     adsr_budget: int = 500,
     instrument_profile: Optional[dict] = None,
+    fitness_mode: str = "mrstft",
 ) -> List[OptimizerResult]:
     """Grid search using multi-note evaluation.
 
@@ -1145,6 +1150,7 @@ def grid_search_multi_note(
                 freeze_indices=freeze,
                 adsr_bound_overrides=adsr_bound_overrides,
                 min_gate_frames=min_gate_frames,
+                fitness_mode=fitness_mode,
             )
             res = opt.run()
 
@@ -1533,6 +1539,7 @@ def grid_search_exhaustive(
     filter_modes: Optional[List[str]] = None,
     test_bit_options: Optional[List[bool]] = None,
     verbose: bool = True,
+    fitness_mode: str = "mrstft",
 ) -> List[OptimizerResult]:
     """Run a short CMA-ES pass over each discrete combo (exhaustive).
 
@@ -1576,6 +1583,7 @@ def grid_search_exhaustive(
             seed=seed,
             work_dir=combo_dir,
             log_interval=0,
+            fitness_mode=fitness_mode,
         )
         res = opt.run()
         if verbose:
