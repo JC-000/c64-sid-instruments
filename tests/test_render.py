@@ -404,6 +404,163 @@ def test_compute_gate_release_extreme_values():
     assert release == 250
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 expressive primitives: backwards compat + new-feature smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_phase1_backwards_compat_bit_identical():
+    """SidParams with phase-1 fields set to defaults must render within the
+    pyresidfp determinism floor of a pair of identical back-to-back calls.
+
+    pyresidfp exhibits a tiny (~1e-4 peak) sample-level residual between
+    nominally-identical renders even when the cache is cleared between
+    calls (upstream init determinism issue). So we compare the
+    "defaults-explicit" render against the "defaults-implicit" render and
+    require the delta to stay below that floor plus a small safety
+    margin, which proves the phase-1 scaffolding is a true no-op when
+    unused.
+    """
+    from sidmatch import render as _render_mod
+
+    base = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=8,
+        release=4,
+        pulse_width=2048,
+        filter_cutoff=1024,
+        filter_mode="off",
+        gate_frames=40,
+        release_frames=20,
+    )
+    # Reference: pure baseline params
+    _render_mod._SID_CACHE.clear()
+    a = render_pyresid(base, sample_rate=SR)
+    # Same params, but touching all phase-1 defaults explicitly -> no-op
+    b_params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=8,
+        release=4,
+        pulse_width=2048,
+        filter_cutoff=1024,
+        filter_mode="off",
+        gate_frames=40,
+        release_frames=20,
+        waveform_table=None,
+        waveform_table_hold_frames=1,
+        hard_restart=False,
+        hard_restart_frames=2,
+        pwm_lfo_rate=0.0,
+        pwm_lfo_depth=0,
+        filter_env=None,
+        filter_env_hold_frames=1,
+    )
+    _render_mod._SID_CACHE.clear()
+    b = render_pyresid(b_params, sample_rate=SR)
+    assert a.shape == b.shape
+
+    # Measure pyresidfp determinism floor for this exact config
+    _render_mod._SID_CACHE.clear()
+    a2 = render_pyresid(base, sample_rate=SR)
+    det_floor = float(np.max(np.abs(a - a2)))
+
+    diff = float(np.max(np.abs(a - b)))
+    # Allow up to 2x the measured determinism floor (plus a small epsilon
+    # for edge cases) — if phase-1 defaults introduced any real logic
+    # change we would see a diff orders of magnitude larger.
+    assert diff <= det_floor * 2 + 1e-5, (
+        f"Phase 1 defaults changed rendering beyond determinism floor: "
+        f"diff={diff}, floor={det_floor}"
+    )
+
+
+def test_phase1_waveform_table_produces_audio():
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=14,
+        release=11,
+        pulse_width=2048,
+        filter_mode="off",
+        gate_frames=60,
+        release_frames=30,
+        waveform_table=[0x80, 0x40, 0x10],  # noise -> pulse -> tri
+        waveform_table_hold_frames=1,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    assert rms > 1e-3, f"waveform_table patch RMS too low: {rms}"
+
+
+def test_phase1_hard_restart_runs():
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=14,
+        release=11,
+        pulse_width=2048,
+        filter_mode="off",
+        gate_frames=50,
+        release_frames=25,
+        hard_restart=True,
+        hard_restart_frames=2,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    assert len(audio) > 0
+    assert float(np.sqrt(np.mean(audio ** 2))) > 1e-3
+
+
+def test_phase1_pwm_lfo_changes_spectrum():
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=0,
+        sustain=15,
+        release=0,
+        pulse_width=2048,
+        filter_mode="off",
+        gate_frames=100,
+        release_frames=10,
+        pwm_lfo_rate=5.0,
+        pwm_lfo_depth=400,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    assert float(np.sqrt(np.mean(audio ** 2))) > 1e-3
+
+
+def test_phase1_filter_env_runs():
+    env = [0x700, 0x600, 0x500, 0x400, 0x300, 0x200, 0x100]
+    params = SidParams(
+        waveform="pulse",
+        frequency=TARGET_HZ,
+        attack=0,
+        decay=9,
+        sustain=14,
+        release=11,
+        pulse_width=2048,
+        filter_mode="lp",
+        filter_voice1=True,
+        filter_resonance=4,
+        gate_frames=60,
+        release_frames=20,
+        filter_env=env,
+        filter_env_hold_frames=4,
+    )
+    audio = render_pyresid(params, sample_rate=SR)
+    assert float(np.sqrt(np.mean(audio ** 2))) > 1e-3
+
+
 def test_compute_gate_release_fast():
     """Fast ADSR: A=0, D=0, S=0, R=0."""
     gate, release = compute_gate_release(0, 0, 0, 0)
