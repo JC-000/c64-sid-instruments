@@ -340,5 +340,22 @@ def distance_v2(
     The legacy :func:`distance` is intentionally left untouched so
     existing optimizer and test code keeps working while this new
     fitness is validated in parallel.
+
+    Length equalization: the reference is trimmed to the candidate's
+    length (when longer). This is important because reference samples
+    from libraries such as Salamander can be 140 s long while SID
+    renders are ~32 s. If we let ``mr_stft_distance`` zero-pad the
+    candidate up to the reference length, a huge chunk of silent
+    frames dominates the log-magnitude distance and swamps the actual
+    onset/decay mismatch. Trimming the reference focuses the loss on
+    the portion both signals actually cover.
     """
-    return mr_stft_distance(ref_wav, cand_wav, sr, **kwargs)
+    ref = np.asarray(ref_wav)
+    cand = np.asarray(cand_wav)
+    if ref.ndim > 1:
+        ref = ref.mean(axis=-1)
+    if cand.ndim > 1:
+        cand = cand.mean(axis=-1)
+    if ref.size > cand.size and cand.size > 0:
+        ref = ref[: cand.size]
+    return mr_stft_distance(ref, cand, sr, **kwargs)

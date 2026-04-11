@@ -33,7 +33,7 @@ from .render import (
     DECAY_RELEASE_MS,
 )
 from .features import FeatureVec, extract, extract_lite, CANONICAL_SR
-from .fitness import distance, distance_lite
+from .fitness import distance, distance_lite, distance_v2
 from .surrogate import FitnessSurrogate
 
 
@@ -449,26 +449,35 @@ _WORKER_FIXED_KWARGS: Optional[dict] = None
 _WORKER_WEIGHTS: Optional[dict] = None
 _WORKER_BEST_FITNESS: Optional[mp.Value] = None
 _WORKER_RENDER_DUR: Optional[float] = None
+_WORKER_FITNESS_MODE: str = "legacy"
+_WORKER_REF_AUDIO: Optional[np.ndarray] = None
 
 
 def _worker_init(
-    ref_fv_dict: dict,
+    ref_fv_dict: Optional[dict],
     fixed_kwargs: dict,
     weights: Optional[dict],
     best_fitness_val: Optional[mp.Value] = None,
     render_dur: Optional[float] = None,
+    fitness_mode: str = "legacy",
+    ref_audio: Optional[np.ndarray] = None,
 ) -> None:
     global _WORKER_REF_FV, _WORKER_FIXED_KWARGS, _WORKER_WEIGHTS
     global _WORKER_BEST_FITNESS, _WORKER_RENDER_DUR
-    _WORKER_REF_FV = _fv_from_dict(ref_fv_dict)
+    global _WORKER_FITNESS_MODE, _WORKER_REF_AUDIO
+    _WORKER_REF_FV = _fv_from_dict(ref_fv_dict) if ref_fv_dict is not None else None
     _WORKER_FIXED_KWARGS = dict(fixed_kwargs)
     _WORKER_WEIGHTS = dict(weights) if weights else None
     _WORKER_BEST_FITNESS = best_fitness_val
     _WORKER_RENDER_DUR = render_dur
+    _WORKER_FITNESS_MODE = str(fitness_mode)
+    _WORKER_REF_AUDIO = (
+        np.asarray(ref_audio, dtype=np.float32) if ref_audio is not None else None
+    )
 
 
 def _worker_eval(x_list: List[float]) -> float:
-    assert _WORKER_REF_FV is not None and _WORKER_FIXED_KWARGS is not None
+    assert _WORKER_FIXED_KWARGS is not None
     x = np.asarray(x_list, dtype=np.float64)
     params = decode_params(x, _WORKER_FIXED_KWARGS)
     chip_model = _WORKER_FIXED_KWARGS.get("chip_model")
@@ -481,6 +490,12 @@ def _worker_eval(x_list: List[float]) -> float:
             if audio.shape[0] > max_samples:
                 audio = audio[:max_samples]
 
+        if _WORKER_FITNESS_MODE == "mrstft":
+            assert _WORKER_REF_AUDIO is not None
+            return float(distance_v2(_WORKER_REF_AUDIO, audio, CANONICAL_SR))
+
+        # Legacy feature-based path.
+        assert _WORKER_REF_FV is not None
         # Early rejection: compute cheap partial fitness first.
         if _WORKER_BEST_FITNESS is not None:
             threshold = _WORKER_BEST_FITNESS.value
@@ -500,12 +515,20 @@ def _worker_eval(x_list: List[float]) -> float:
 def _eval_single(
     x: np.ndarray,
     fixed_kwargs: dict,
-    ref_fv: FeatureVec,
+    ref_fv: Optional[FeatureVec],
     weights: Optional[dict],
     best_fitness: float = float("inf"),
     render_dur_s: Optional[float] = None,
+    fitness_mode: str = "legacy",
+    ref_audio: Optional[np.ndarray] = None,
 ) -> float:
-    """In-process evaluation (used when n_workers=1)."""
+    """In-process evaluation (used when n_workers=1).
+
+    When ``fitness_mode == "mrstft"``, ``ref_audio`` (the raw mono
+    waveform at ``CANONICAL_SR``) is used via :func:`distance_v2`, and
+    ``ref_fv`` may be ``None``. The legacy path is bit-identical to the
+    previous behaviour.
+    """
     params = decode_params(x, fixed_kwargs)
     chip_model = fixed_kwargs.get("chip_model")
     try:
@@ -516,6 +539,10 @@ def _eval_single(
             max_samples = int(render_dur_s * CANONICAL_SR)
             if audio.shape[0] > max_samples:
                 audio = audio[:max_samples]
+
+        if fitness_mode == "mrstft":
+            assert ref_audio is not None, "mrstft mode requires ref_audio"
+            return float(distance_v2(ref_audio, audio, CANONICAL_SR))
 
         # Early rejection: compute cheap partial fitness first.
         if best_fitness < 1e5:
@@ -637,7 +664,11 @@ class Optimizer:
         freeze_indices: Optional[dict] = None,
         adsr_bound_overrides: Optional[dict] = None,
         min_gate_frames: Optional[int] = None,
+        fitness_mode: str = "mrstft",
     ) -> None:
+        if fitness_mode not in ("mrstft", "legacy"):
+            raise ValueError(f"fitness_mode must be 'mrstft' or 'legacy', got {fitness_mode!r}")
+        self.fitness_mode = str(fitness_mode)
         self.use_surrogate = bool(use_surrogate)
         self.optimizer_backend = optimizer_backend
         self.sensitivity_screen = bool(sensitivity_screen)
@@ -726,6 +757,45 @@ class Optimizer:
         truncated = self._ref_audio[:max_samples]
         return extract(truncated, CANONICAL_SR)
 
+    def _ref_audio_for_duration(self, dur_s: Optional[float]) -> Optional[np.ndarray]:
+        """Return the reference waveform truncated to *dur_s* seconds."""
+        if self._ref_audio is None:
+            return None
+        if dur_s is None:
+            return self._ref_audio
+        max_samples = int(dur_s * CANONICAL_SR)
+        if self._ref_audio.shape[0] <= max_samples:
+            return self._ref_audio
+        return self._ref_audio[:max_samples]
+
+    def _eval(
+        self,
+        x: np.ndarray,
+        fixed_kwargs: dict,
+        ref_fv: Optional[FeatureVec],
+        weights: Optional[dict],
+        best_fitness: float = float("inf"),
+        render_dur_s: Optional[float] = None,
+    ) -> float:
+        """Route evaluation through the selected fitness_mode.
+
+        In mrstft mode, the raw reference waveform (truncated to the
+        current render-duration tier) is passed to ``distance_v2``.
+        In legacy mode this is a straight pass-through to
+        ``_eval_single`` and is bit-identical to the previous code path.
+        """
+        ref_audio = (
+            self._ref_audio_for_duration(render_dur_s)
+            if self.fitness_mode == "mrstft" else None
+        )
+        return _eval_single(
+            x, fixed_kwargs, ref_fv, weights,
+            best_fitness=best_fitness,
+            render_dur_s=render_dur_s,
+            fitness_mode=self.fitness_mode,
+            ref_audio=ref_audio,
+        )
+
     # ---------- sensitivity screen ----------
 
     def _sensitivity_screen(
@@ -763,7 +833,7 @@ class Optimizer:
 
         # Evaluate baseline.
         x0_full = _expand_vector(_denorm(x0_norm), active_idx, bounds_high)
-        baseline = _eval_single(
+        baseline = self._eval(
             x0_full, fixed_kwargs, ref_fv,
             self.weights, render_dur_s=render_dur_s,
         )
@@ -781,7 +851,7 @@ class Optimizer:
             x_low = x0_norm.copy()
             x_low[pos] = 0.0
             x_low_full = _expand_vector(_denorm(x_low), active_idx, bounds_high)
-            f_low = _eval_single(
+            f_low = self._eval(
                 x_low_full, fixed_kwargs, ref_fv,
                 self.weights, render_dur_s=render_dur_s,
             )
@@ -790,7 +860,7 @@ class Optimizer:
             x_high = x0_norm.copy()
             x_high[pos] = 1.0
             x_high_full = _expand_vector(_denorm(x_high), active_idx, bounds_high)
-            f_high = _eval_single(
+            f_high = self._eval(
                 x_high_full, fixed_kwargs, ref_fv,
                 self.weights, render_dur_s=render_dur_s,
             )
@@ -908,6 +978,7 @@ class Optimizer:
         # Coarse-to-fine: current render duration tier and matching ref features.
         current_render_dur = self._render_duration_for_eval(0)
         current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+        current_ref_audio = self._ref_audio_for_duration(current_render_dur)
 
         study = optuna.create_study(
             sampler=optuna.samplers.TPESampler(
@@ -952,7 +1023,8 @@ class Optimizer:
                 processes=n_workers,
                 initializer=_worker_init,
                 initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                          best_fitness_shared, current_render_dur),
+                          best_fitness_shared, current_render_dur,
+                          self.fitness_mode, current_ref_audio),
             )
 
         try:
@@ -962,6 +1034,7 @@ class Optimizer:
                 if new_render_dur != current_render_dur:
                     current_render_dur = new_render_dur
                     current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    current_ref_audio = self._ref_audio_for_duration(current_render_dur)
                     ref_fv_dict = _fv_to_dict(current_ref_fv)
                     best_fitness = float("inf")
                     non_improve = 0
@@ -976,7 +1049,8 @@ class Optimizer:
                             processes=n_workers,
                             initializer=_worker_init,
                             initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                                      best_fitness_shared, current_render_dur),
+                                      best_fitness_shared, current_render_dur,
+                                      self.fitness_mode, current_ref_audio),
                         )
 
                 # Ask Optuna for a batch of trials.
@@ -992,7 +1066,7 @@ class Optimizer:
                     fitnesses = pool.map(_worker_eval, candidates_list)
                 else:
                     fitnesses = [
-                        _eval_single(
+                        self._eval(
                             np.asarray(c), self.fixed_kwargs, current_ref_fv,
                             self.weights, best_fitness=best_fitness,
                             render_dur_s=current_render_dur,
@@ -1133,7 +1207,8 @@ class Optimizer:
             # All params frozen -- evaluate the single point and return.
             current_render_dur = self._render_duration_for_eval(0)
             current_ref_fv = self._ref_fv_for_duration(current_render_dur)
-            fitness = _eval_single(
+            current_ref_audio = self._ref_audio_for_duration(current_render_dur)
+            fitness = self._eval(
                 x0_full, self.fixed_kwargs, current_ref_fv,
                 self.weights, render_dur_s=current_render_dur,
             )
@@ -1153,6 +1228,7 @@ class Optimizer:
             n_grid = 50
             current_render_dur = self._render_duration_for_eval(0)
             current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+            current_ref_audio = self._ref_audio_for_duration(current_render_dur)
             best_fitness = float("inf")
             best_x_full_grid: np.ndarray = x0_full.copy()
             for val in np.linspace(0.0, 1.0, n_grid):
@@ -1161,7 +1237,7 @@ class Optimizer:
                 if frozen_values:
                     for fidx, fval in frozen_values.items():
                         x_full[fidx] = fval
-                fitness = _eval_single(
+                fitness = self._eval(
                     x_full, self.fixed_kwargs, current_ref_fv,
                     self.weights, best_fitness=best_fitness,
                     render_dur_s=current_render_dur,
@@ -1210,6 +1286,7 @@ class Optimizer:
         # Coarse-to-fine: current render duration tier and matching ref features.
         current_render_dur = self._render_duration_for_eval(0)
         current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+        current_ref_audio = self._ref_audio_for_duration(current_render_dur)
 
         # Build pool if parallel.
         pool = None
@@ -1222,7 +1299,8 @@ class Optimizer:
                 processes=self.n_workers,
                 initializer=_worker_init,
                 initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                          best_fitness_shared, current_render_dur),
+                          best_fitness_shared, current_render_dur,
+                          self.fitness_mode, current_ref_audio),
             )
 
         try:
@@ -1235,6 +1313,7 @@ class Optimizer:
                 if new_render_dur != current_render_dur:
                     current_render_dur = new_render_dur
                     current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    current_ref_audio = self._ref_audio_for_duration(current_render_dur)
                     ref_fv_dict = _fv_to_dict(current_ref_fv)
                     # Reset best fitness since features changed with new duration.
                     best_fitness = float("inf")
@@ -1256,7 +1335,8 @@ class Optimizer:
                             processes=self.n_workers,
                             initializer=_worker_init,
                             initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                                      best_fitness_shared, current_render_dur),
+                                      best_fitness_shared, current_render_dur,
+                                      self.fitness_mode, current_ref_audio),
                         )
 
                 solutions_norm = es.ask()
@@ -1289,7 +1369,7 @@ class Optimizer:
                     eval_fitnesses = pool.map(_worker_eval, eval_full_list)
                 else:
                     eval_fitnesses = [
-                        _eval_single(
+                        self._eval(
                             np.asarray(s), self.fixed_kwargs, current_ref_fv,
                             self.weights, best_fitness=best_fitness,
                             render_dur_s=current_render_dur,
@@ -1345,7 +1425,7 @@ class Optimizer:
                                 if frozen_values:
                                     for fidx, fval in frozen_values.items():
                                         cand_full[fidx] = fval
-                                cand_fitness = _eval_single(
+                                cand_fitness = self._eval(
                                     cand_full, self.fixed_kwargs, current_ref_fv,
                                     self.weights, best_fitness=best_fitness,
                                     render_dur_s=current_render_dur,
@@ -1468,6 +1548,7 @@ class Optimizer:
         # ---- Phase 1: TPE exploration ----
         current_render_dur = self._render_duration_for_eval(0)
         current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+        current_ref_audio = self._ref_audio_for_duration(current_render_dur)
 
         study = optuna.create_study(
             sampler=optuna.samplers.TPESampler(
@@ -1509,7 +1590,8 @@ class Optimizer:
                 processes=n_workers,
                 initializer=_worker_init,
                 initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                          best_fitness_shared, current_render_dur),
+                          best_fitness_shared, current_render_dur,
+                          self.fitness_mode, current_ref_audio),
             )
 
         try:
@@ -1518,6 +1600,7 @@ class Optimizer:
                 if new_render_dur != current_render_dur:
                     current_render_dur = new_render_dur
                     current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    current_ref_audio = self._ref_audio_for_duration(current_render_dur)
                     ref_fv_dict = _fv_to_dict(current_ref_fv)
                     best_fitness = float("inf")
                     non_improve = 0
@@ -1531,7 +1614,8 @@ class Optimizer:
                             processes=n_workers,
                             initializer=_worker_init,
                             initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                                      best_fitness_shared, current_render_dur),
+                                      best_fitness_shared, current_render_dur,
+                                      self.fitness_mode, current_ref_audio),
                         )
 
                 batch_size = min(n_workers, tpe_budget - evaluations)
@@ -1543,7 +1627,7 @@ class Optimizer:
                     fitnesses = pool.map(_worker_eval, candidates_list)
                 else:
                     fitnesses = [
-                        _eval_single(
+                        self._eval(
                             np.asarray(c), self.fixed_kwargs, current_ref_fv,
                             self.weights, best_fitness=best_fitness,
                             render_dur_s=current_render_dur,
@@ -1661,6 +1745,7 @@ class Optimizer:
         # Coarse-to-fine rendering for CMA-ES phase.
         current_render_dur = self._render_duration_for_eval(evaluations)
         current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+        current_ref_audio = self._ref_audio_for_duration(current_render_dur)
 
         frozen_values = dict(self.freeze_indices)
 
@@ -1674,7 +1759,8 @@ class Optimizer:
                 processes=self.n_workers,
                 initializer=_worker_init,
                 initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                          best_fitness_shared, current_render_dur),
+                          best_fitness_shared, current_render_dur,
+                          self.fitness_mode, current_ref_audio),
             )
 
         try:
@@ -1686,6 +1772,7 @@ class Optimizer:
                 if new_render_dur != current_render_dur:
                     current_render_dur = new_render_dur
                     current_ref_fv = self._ref_fv_for_duration(current_render_dur)
+                    current_ref_audio = self._ref_audio_for_duration(current_render_dur)
                     ref_fv_dict = _fv_to_dict(current_ref_fv)
                     best_fitness = float("inf")
                     non_improve = 0
@@ -1704,7 +1791,8 @@ class Optimizer:
                             processes=self.n_workers,
                             initializer=_worker_init,
                             initargs=(ref_fv_dict, self.fixed_kwargs, self.weights,
-                                      best_fitness_shared, current_render_dur),
+                                      best_fitness_shared, current_render_dur,
+                                      self.fitness_mode, current_ref_audio),
                         )
 
                 solutions_norm = es.ask()
@@ -1733,7 +1821,7 @@ class Optimizer:
                     eval_fitnesses = pool.map(_worker_eval, eval_full_list)
                 else:
                     eval_fitnesses = [
-                        _eval_single(
+                        self._eval(
                             np.asarray(s), self.fixed_kwargs, current_ref_fv,
                             self.weights, best_fitness=best_fitness,
                             render_dur_s=current_render_dur,
@@ -1784,7 +1872,7 @@ class Optimizer:
                                 if frozen_values:
                                     for fidx, fval in frozen_values.items():
                                         cand_full[fidx] = fval
-                                cand_fitness = _eval_single(
+                                cand_fitness = self._eval(
                                     cand_full, self.fixed_kwargs, current_ref_fv,
                                     self.weights, best_fitness=best_fitness,
                                     render_dur_s=current_render_dur,
@@ -1963,7 +2051,12 @@ class MultiNoteOptimizer:
         freeze_indices: Optional[dict] = None,
         adsr_bound_overrides: Optional[dict] = None,
         min_gate_frames: Optional[int] = None,
+        fitness_mode: str = "legacy",  # MultiNote only supports legacy for now.
     ) -> None:
+        # fitness_mode is accepted for API parity with Optimizer but
+        # multi-note evaluation remains on the legacy feature path.
+        self.fitness_mode = "legacy"
+        _ = fitness_mode
         self.use_surrogate = bool(use_surrogate)
         self.optimizer_backend = optimizer_backend
         self.sensitivity_screen = bool(sensitivity_screen)
