@@ -1,0 +1,196 @@
+{
+  "handcraft_wt_tri_only": {
+    "label": "handcraft_wt_tri_only",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06084,
+    "peak": 0.26993,
+    "transient_peak_50ms": 0.26993,
+    "early_rms_200ms": 0.12003,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x11"
+    ]
+  },
+  "handcraft_wt_tri_only_fur_elise": {
+    "label": "handcraft_wt_tri_only_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.29852,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.91141,
+    "early_rms_200ms": 0.40559,
+    "late_rms_500ms": 0.221,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pul_tri": {
+    "label": "handcraft_wt_pul_tri",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.0612,
+    "peak": 0.27756,
+    "transient_peak_50ms": 0.27756,
+    "early_rms_200ms": 0.12251,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x41",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pul_tri_fur_elise": {
+    "label": "handcraft_wt_pul_tri_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.27783,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.91498,
+    "early_rms_200ms": 0.38123,
+    "late_rms_500ms": 0.20227,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x41",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pultri_tri": {
+    "label": "handcraft_wt_pultri_tri",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06056,
+    "peak": 0.27496,
+    "transient_peak_50ms": 0.27496,
+    "early_rms_200ms": 0.1175,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x51",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pultri_tri_fur_elise": {
+    "label": "handcraft_wt_pultri_tri_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.27708,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.88602,
+    "early_rms_200ms": 0.37223,
+    "late_rms_500ms": 0.20863,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x51",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_noisepul_pul_tri": {
+    "label": "handcraft_wt_noisepul_pul_tri",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06081,
+    "peak": 0.27502,
+    "transient_peak_50ms": 0.17685,
+    "early_rms_200ms": 0.12029,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0xc1",
+      "0x41",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_noisepul_pul_tri_fur_elise": {
+    "label": "handcraft_wt_noisepul_pul_tri_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.2761,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.52081,
+    "early_rms_200ms": 0.37205,
+    "late_rms_500ms": 0.20608,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0xc1",
+      "0x41",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pul_pultri_tri": {
+    "label": "handcraft_wt_pul_pultri_tri",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06096,
+    "peak": 0.27756,
+    "transient_peak_50ms": 0.27756,
+    "early_rms_200ms": 0.12038,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x41",
+      "0x51",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_pul_pultri_tri_fur_elise": {
+    "label": "handcraft_wt_pul_pultri_tri_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.27336,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.91467,
+    "early_rms_200ms": 0.37054,
+    "late_rms_500ms": 0.20225,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0x41",
+      "0x51",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_noisepul_tri": {
+    "label": "handcraft_wt_noisepul_tri",
+    "samples": 1277325,
+    "duration_s": 28.964,
+    "rms": 0.06045,
+    "peak": 0.26459,
+    "transient_peak_50ms": 0.177,
+    "early_rms_200ms": 0.11624,
+    "late_rms_500ms": 0.01653,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0xc1",
+      "0x11"
+    ]
+  },
+  "handcraft_wt_noisepul_tri_fur_elise": {
+    "label": "handcraft_wt_noisepul_tri_fur_elise",
+    "samples": 882000,
+    "duration_s": 20.0,
+    "rms": 0.28173,
+    "peak": 0.95001,
+    "transient_peak_50ms": 0.53961,
+    "early_rms_200ms": 0.37691,
+    "late_rms_500ms": 0.21352,
+    "nan_frac": 0.0,
+    "clip_frac": 0.0,
+    "waveform_table": [
+      "0xc1",
+      "0x11"
+    ]
+  }
+}
