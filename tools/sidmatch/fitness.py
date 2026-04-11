@@ -33,6 +33,7 @@ from typing import Mapping, Optional
 import numpy as np
 
 from .features import FeatureVec
+from .fitness_mrstft import mr_stft_distance
 
 
 DEFAULT_WEIGHTS: dict = {
@@ -320,3 +321,24 @@ def distance(
         total += w[k] * float(v)
     # guard against tiny negative floats
     return float(max(0.0, total))
+
+
+def distance_v2(
+    ref_wav: np.ndarray,
+    cand_wav: np.ndarray,
+    sr: int,
+    **kwargs,
+) -> float:
+    """Waveform-level fitness using multi-resolution STFT with log-mag.
+
+    This is the Phase 2.5 replacement for :func:`distance`. It operates
+    directly on mono waveforms (not :class:`FeatureVec`) and uses a
+    log-magnitude multi-resolution STFT loss with per-frame RMS
+    weighting so decay tails are not dominated by attack transients.
+    See :mod:`tools.sidmatch.fitness_mrstft` for details.
+
+    The legacy :func:`distance` is intentionally left untouched so
+    existing optimizer and test code keeps working while this new
+    fitness is validated in parallel.
+    """
+    return mr_stft_distance(ref_wav, cand_wav, sr, **kwargs)
