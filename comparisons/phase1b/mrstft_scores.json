@@ -1,0 +1,86 @@
+[
+  {
+    "label": "comp:    grand-piano-8580-scale-4a94c09",
+    "path": "comparisons/grand-piano-8580-scale-4a94c09.wav",
+    "mrstft": 91.60462009016014,
+    "cand_samples": 1436103,
+    "cand_duration_s": 32.565
+  },
+  {
+    "label": "comp:    grand-piano-8580-scale-head",
+    "path": "comparisons/grand-piano-8580-scale-head.wav",
+    "mrstft": 107.39991236200558,
+    "cand_samples": 1428165,
+    "cand_duration_s": 32.385
+  },
+  {
+    "label": "comp:    grand-piano-8580-scale-mrstft-opt",
+    "path": "comparisons/grand-piano-8580-scale-mrstft-opt.wav",
+    "mrstft": 115.94889602243323,
+    "cand_samples": 1197927,
+    "cand_duration_s": 27.164
+  },
+  {
+    "label": "phase1b: pul_pultri_tri    [0x41,0x51,0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_pul_pultri_tri.wav",
+    "mrstft": 412.323747340949,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1b: pul_tri           [0x41,0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_pul_tri.wav",
+    "mrstft": 412.4102986137366,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1b: pultri_tri        [0x51,0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_pultri_tri.wav",
+    "mrstft": 415.7489630962628,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1b: noisepul_pul_tri  [0xC1,0x41,0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_noisepul_pul_tri.wav",
+    "mrstft": 416.40752649459574,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1:  handcraft_full    [0x81,0x41,0x11]",
+    "path": "comparisons/phase1/handcraft_full.wav",
+    "mrstft": 418.1434801869338,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1b: tri_only          [0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_tri_only.wav",
+    "mrstft": 420.44765755959133,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1b: noisepul_tri      [0xC1,0x11]",
+    "path": "comparisons/phase1b/handcraft_wt_noisepul_tri.wav",
+    "mrstft": 431.9756042815928,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  },
+  {
+    "label": "phase1:  no_hard_restart",
+    "path": "comparisons/phase1/handcraft_no_hard_restart.wav",
+    "mrstft": 436.50952599316184,
+    "cand_samples": 1261440,
+    "cand_duration_s": 28.604
+  },
+  {
+    "label": "phase1:  no_waveform_table",
+    "path": "comparisons/phase1/handcraft_no_waveform_table.wav",
+    "mrstft": 666.4407113139459,
+    "cand_samples": 1277325,
+    "cand_duration_s": 28.964
+  }
+]
