@@ -156,6 +156,8 @@ def _run_match_single_chip(
         seed=args.seed,
         max_attack=args.max_attack,
         optimizer_backend=getattr(args, "optimizer", "cma"),
+        three_phase=getattr(args, "three_phase", True),
+        adsr_budget=getattr(args, "adsr_budget", 500),
     )
 
     result = grid_results[0]
@@ -239,6 +241,8 @@ def _run_match_multi_note_chip(
         seed=args.seed,
         max_attack=args.max_attack,
         optimizer_backend=getattr(args, "optimizer", "cma"),
+        three_phase=getattr(args, "three_phase", True),
+        adsr_budget=getattr(args, "adsr_budget", 500),
     )
 
     result = grid_results[0]
@@ -854,6 +858,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="free-text description of the reference recording")
     m.add_argument("--optimizer", default="cma", choices=["cma", "tpe"],
                    help="optimizer backend: cma (CMA-ES, default) or tpe (Optuna TPE)")
+    m.add_argument("--three-phase", default=True, action=argparse.BooleanOptionalAction,
+                   help="use three-phase hierarchical optimization (default: True)")
+    m.add_argument("--adsr-budget", type=int, default=500,
+                   help="evaluation budget for Phase 2 ADSR sweep per combo (default: 500)")
     m.set_defaults(func=cmd_match)
 
     e = sub.add_parser("export", help="export work-dir result to instruments/")

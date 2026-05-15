@@ -1,0 +1,38 @@
+{
+  "C4": {
+    "freq_hz": 261.63,
+    "file": "iowa-flute-C4-ff.wav"
+  },
+  "Eb4": {
+    "freq_hz": 311.13,
+    "file": "iowa-flute-Eb4-ff.wav"
+  },
+  "Gb4": {
+    "freq_hz": 369.99,
+    "file": "iowa-flute-Gb4-ff.wav"
+  },
+  "A4": {
+    "freq_hz": 440.0,
+    "file": "iowa-flute-A4-ff.wav"
+  },
+  "C5": {
+    "freq_hz": 523.25,
+    "file": "iowa-flute-C5-ff.wav"
+  },
+  "Eb5": {
+    "freq_hz": 622.25,
+    "file": "iowa-flute-Eb5-ff.wav"
+  },
+  "Gb5": {
+    "freq_hz": 739.99,
+    "file": "iowa-flute-Gb5-ff.wav"
+  },
+  "A5": {
+    "freq_hz": 880.0,
+    "file": "iowa-flute-A5-ff.wav"
+  },
+  "C6": {
+    "freq_hz": 1046.5,
+    "file": "iowa-flute-C6-ff.wav"
+  }
+}
