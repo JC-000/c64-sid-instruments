@@ -181,6 +181,9 @@ components with a **multi-scale log-mel MSE** fitness function and added
 | `harmonics` | cosine distance of partial vectors | 2.0 |
 | `fundamental` | squared log2-ratio of f0 estimates | 2.0 |
 | `adsr` | L1 over (attack, decay, sustain, release) / 4 | 1.0 |
+| `onset_spectral` | adaptive onset-weighted spectral loss (weights attack transient by reference spectral flux) | 0.5 |
+| `mfcc` | MFCC distance (timbral identity via Mel-frequency cepstral coefficients) | 0.5 |
+| `spectral_convergence` | Frobenius norm ratio of reference vs candidate spectrograms | 0.5 |
 
 Properties: `distance(x, x) == 0`, symmetric, non-negative.
 Override via `weights={"harmonics": 3.0, ...}`.
@@ -268,7 +271,8 @@ subdirectory).
 | `--work-dir`    | required | output directory                                    |
 | `--chip-model`  | None    | `"6581"` or `"8580"` (default: run both)             |
 | `--parallel-chips` / `--no-parallel-chips` | off | Refine both chip models concurrently (opt-in; useful on high-core-count machines) |
-| `--optimizer`   | `cma`   | optimizer backend: `cma` (CMA-ES) or `tpe` (Optuna TPE) |
+| `--optimizer`   | `cma`   | optimizer backend: `cma` (CMA-ES), `tpe` (Optuna TPE), or `tpe+cma` (hybrid) |
+| `--perceptual-rerank` | off | re-rank top-K candidates using Zimtohrli psychoacoustic metric |
 
 ### Optuna TPE alternative
 
@@ -307,6 +311,29 @@ CMA-ES remains the default, but TPE is now a viable alternative --
 especially for 1-dimensional search spaces where CMA-ES cannot
 operate. TPE instrument outputs are included in the repo under
 `instruments/*-tpe/` for comparison.
+
+### Hybrid TPE+CMA-ES backend
+
+Pass `--optimizer tpe+cma` to run a two-stage hybrid optimization:
+
+1. **TPE exploration (25% of budget)** -- Optuna's TPE explores the
+   parameter space broadly, building density models over promising
+   regions.
+2. **CMA-ES refinement (75% of budget)** -- the best TPE solutions are
+   used to warm-start CMA-ES: the mean is set to TPE's best point,
+   sigma and per-dimension standard deviations are derived from the top
+   solutions, and the best solutions are injected into the initial
+   CMA-ES population.
+
+This combines TPE's strength at global exploration with CMA-ES's
+efficient local refinement.
+
+### Zimtohrli perceptual re-ranking
+
+Pass `--perceptual-rerank` to re-rank the top-K candidates after
+optimization using Google's Zimtohrli psychoacoustic metric. This
+provides a perceptually-grounded validation step beyond the spectral
+fitness function. Requires `pip install zimtohrli`.
 
 ---
 
@@ -439,8 +466,11 @@ no quality regression in fitness scores.
 python3 -m pip install --user --break-system-packages \
     pyresidfp librosa numpy scipy soundfile cma pytest
 
-# Optional: for --optimizer tpe
+# Optional: for --optimizer tpe or tpe+cma
 python3 -m pip install --user --break-system-packages optuna
+
+# Optional: for --perceptual-rerank
+python3 -m pip install --user --break-system-packages zimtohrli
 ```
 
 Tests:
