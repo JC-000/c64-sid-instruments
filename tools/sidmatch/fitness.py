@@ -112,6 +112,30 @@ def _adsr_l1(ref: FeatureVec, cand: FeatureVec) -> float:
     return float(sum(terms) / 4.0)
 
 
+def distance_lite(
+    ref: FeatureVec,
+    cand: FeatureVec,
+    weights: Optional[Mapping[str, float]] = None,
+) -> float:
+    """Cheap partial distance using only envelope, harmonics, fundamental, and ADSR.
+
+    Returns a lower bound on the full distance (since skipped spectral
+    components are always >= 0).
+    """
+    w = dict(DEFAULT_WEIGHTS)
+    if weights:
+        for k, v in weights.items():
+            if k in w:
+                w[k] = float(v)
+
+    total = 0.0
+    total += w["envelope"] * _envelope_l2(ref.amplitude_envelope, cand.amplitude_envelope)
+    total += w["harmonics"] * _cosine_distance(ref.harmonic_magnitudes, cand.harmonic_magnitudes)
+    total += w["fundamental"] * _f0_log_ratio(ref.fundamental_hz, cand.fundamental_hz)
+    total += w["adsr"] * _adsr_l1(ref, cand)
+    return float(max(0.0, total))
+
+
 def distance(
     ref: FeatureVec,
     cand: FeatureVec,
