@@ -120,3 +120,42 @@ python3 tools/render_fur_elise.py \
   ADSR decay interacts with the melody, so the "same" params will sound
   slightly different here than in the chromatic-scale WAVs where each
   note gets the full 200+ frame gate.
+
+## MR-STFT A/B: grand piano 8580 chromatic scale (2026-04)
+
+Scored against `instruments/grand-piano/grand-piano-reference-scale.wav`
+(Salamander reference, 140 s) using the new MR-STFT log-mag fitness
+(`sidmatch.fitness.distance_v2`). Lower is better. Reference is trimmed
+to the candidate's length before the distance is computed (see
+`distance_v2` docstring for rationale).
+
+| Variant | ADSR | Params source | MR-STFT |
+|---|---|---|---|
+| `grand-piano-8580-scale-head.wav` | 2/6/15/12 | `instruments/grand-piano/8580/grand-piano-8580-params.json` (HEAD, v15 baseline) | 107.40 |
+| `grand-piano-8580-scale-4a94c09.wav` | 8/9/12/11 | `4a94c09:instruments/grand-piano/8580/grand-piano-8580-params.json` (TPE+warm-start run, reverted in `9ec6636`) | **91.60** |
+| `grand-piano-8580-scale-mrstft-opt.wav` | 0/10/12/9 | single-note CMA-ES on Salamander A4, `--fitness mrstft --instrument-type piano`, budget 600 | 115.95 |
+
+Under MR-STFT, the 4a94c09 TPE+warm-start params that were reverted for
+perceptual reasons score the best of the three — that matches the flag
+raised by the PR #27 validation agent. The single-note A4 re-run with
+the new fitness generalises poorly to the full chromatic scale: 27 s of
+rendered audio vs the full scale, a pulse (not saw) sustain, and a
+noise-attack combo chosen by the CMA-ES. **HEAD params were left
+unchanged** because the re-optimisation does not improve over either
+baseline.
+
+Rendering / scoring reproducer:
+
+```bash
+# Run the optimization (single-note, A4, budget 600):
+PYTHONPATH=tools python3 -m sidmatch.cli match \
+    --sample tools/samples/grand-piano/salamander-piano-A4-v12-f.wav \
+    --frequency 440.0 --name grand-piano-mrstft \
+    --budget 600 --workers 5 --seed 1 \
+    --chip-model 8580 --no-all-chips \
+    --instrument-type piano --fitness mrstft \
+    --work-dir work/grand-piano-mrstft-8580
+
+# Then score the three param sets against the Salamander scale with
+# distance_v2 — see the script in this PR's body.
+```

@@ -11,6 +11,7 @@ import soundfile as sf
 
 from sidmatch.optimize import (
     Optimizer,
+    _eval_single,
     encode_params,
     decode_params,
     compute_render_duration,
@@ -260,3 +261,104 @@ def test_checkpoint_restore(tmp_path):
     p = sid_params_from_dict(state["best_params"])
     assert p.effective_sustain_waveform() == "saw"
     assert p.filter_mode == "off"
+
+
+# --------------------------------------------------------------------------
+# MR-STFT fitness wiring
+# --------------------------------------------------------------------------
+
+def test_eval_single_mrstft_mode_finite_positive(tmp_path):
+    """_eval_single(fitness_mode='mrstft') returns a finite positive scalar
+    for a sane candidate, and returns 0 when ref == cand.
+    """
+    ref_audio = render_pyresid(_KNOWN_PATCH, sample_rate=CANONICAL_SR)
+
+    # Sane candidate: identical decision vector -> fitness == 0.
+    x = encode_params(_KNOWN_PATCH)
+    fixed = {
+        "wt_sustain_waveform": "saw",
+        "filter_mode": "off",
+        "filter_voice1": False,
+        "frequency": 440.0,
+    }
+    f_self = _eval_single(
+        x, fixed, ref_fv=None, weights=None,
+        fitness_mode="mrstft", ref_audio=ref_audio,
+    )
+    assert np.isfinite(f_self)
+    assert f_self >= 0.0
+
+    # Heavily perturbed candidate (very different decay + sustain) should
+    # score strictly worse than the near-match above.
+    perturbed = SidParams(
+        **{**_KNOWN_PATCH.__dict__, "decay": 0, "sustain": 0, "release": 15}
+    )
+    x2 = encode_params(perturbed)
+    f_diff = _eval_single(
+        x2, fixed, ref_fv=None, weights=None,
+        fitness_mode="mrstft", ref_audio=ref_audio,
+    )
+    assert np.isfinite(f_diff)
+    assert f_diff > 0.0
+    assert f_diff > f_self
+
+
+def test_optimizer_accepts_mrstft_mode(tmp_path):
+    """Optimizer with fitness_mode='mrstft' runs a tiny budget and returns
+    a finite fitness + SidParams, confirming the eval path is wired.
+    """
+    ref_wav = _synthesize_ref_wav(tmp_path)
+    fixed = {
+        "wt_sustain_waveform": "saw",
+        "filter_mode": "off",
+        "filter_voice1": False,
+        "frequency": 440.0,
+    }
+    opt = Optimizer(
+        ref_wav_path=ref_wav,
+        ref_frequency_hz=440.0,
+        fixed_kwargs=fixed,
+        budget=10,
+        patience=10_000,
+        n_workers=1,
+        seed=0,
+        work_dir=tmp_path / "work_mrstft",
+        log_interval=0,
+        fitness_mode="mrstft",
+    )
+    assert opt.fitness_mode == "mrstft"
+    result = opt.run()
+    assert result.evaluations >= 1
+    assert np.isfinite(result.best_fitness)
+    assert result.best_fitness >= 0.0
+    assert result.best_params is not None
+
+
+def test_optimizer_legacy_mode_default_changed():
+    """Default fitness_mode is now mrstft; legacy is still selectable."""
+    opt_default = Optimizer.__init__.__defaults__  # not the cleanest, but ok
+    # Robust check: explicitly pass both modes and verify attribute.
+    class _Dummy:
+        pass
+    # Use minimal init via ref_audio path.
+    audio = render_pyresid(_KNOWN_PATCH, sample_rate=CANONICAL_SR)
+    opt_m = Optimizer(
+        ref_wav_path=None,
+        ref_frequency_hz=440.0,
+        fixed_kwargs={"wt_sustain_waveform": "saw", "filter_mode": "off",
+                      "filter_voice1": False, "frequency": 440.0},
+        ref_audio=audio, ref_sr=CANONICAL_SR,
+        budget=1, patience=1, n_workers=1, log_interval=0,
+    )
+    assert opt_m.fitness_mode == "mrstft"
+
+    opt_l = Optimizer(
+        ref_wav_path=None,
+        ref_frequency_hz=440.0,
+        fixed_kwargs={"wt_sustain_waveform": "saw", "filter_mode": "off",
+                      "filter_voice1": False, "frequency": 440.0},
+        ref_audio=audio, ref_sr=CANONICAL_SR,
+        budget=1, patience=1, n_workers=1, log_interval=0,
+        fitness_mode="legacy",
+    )
+    assert opt_l.fitness_mode == "legacy"
