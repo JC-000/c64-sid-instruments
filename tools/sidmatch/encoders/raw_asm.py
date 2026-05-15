@@ -195,11 +195,14 @@ def encode_raw_asm(
         else:
             wf_byte = _build_control_byte(params, sustain_wf)
             comment = f"sustain wf (frame {f})"
-        wt_rows.append((wf_byte, f, comment))
+        # Right column $00 = no pitch change; the tracker controls the note
+        # via the frequency registers.  Using any other value here would
+        # override the player's pitch (values $01-$5F set absolute notes).
+        wt_rows.append((wf_byte, 0x00, comment))
 
-    for wf_byte, frame, comment in wt_rows:
+    for wf_byte, cmd, comment in wt_rows:
         lines.append(
-            f"    !byte {_fmt_byte(wf_byte)}, {_fmt_byte(frame & 0xFF)} "
+            f"    !byte {_fmt_byte(wf_byte)}, {_fmt_byte(cmd)} "
             f"; {comment}"
         )
     lines.append(f"    !byte $ff, $00             ; end-of-table marker")

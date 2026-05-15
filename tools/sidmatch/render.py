@@ -105,11 +105,12 @@ def compute_gate_release(attack: int, decay: int, sustain: int, release: int) ->
     release_ms = DECAY_RELEASE_MS[max(0, min(15, release))]
 
     # Gate must cover attack + enough decay to reach sustain level.
-    # If sustain == 15, decay is skipped (already at peak = sustain).
-    if sustain >= 15:
-        gate_ms = attack_ms + 100  # just past attack
-    else:
-        gate_ms = attack_ms + decay_ms
+    # If sustain == 15, decay is skipped (already at peak = sustain),
+    # but we still need enough gate time for the sound to ring so that
+    # feature extraction can meaningfully compare against the reference.
+    # Use attack + decay_ms as the minimum even at S=15, so the gate
+    # duration is consistent and never collapses to a tiny value.
+    gate_ms = attack_ms + decay_ms
 
     gate_frames = max(10, min(200, int(gate_ms / 20) + 5))  # PAL frames, with margin
 
