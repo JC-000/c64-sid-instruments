@@ -12,9 +12,11 @@ The old exhaustive strategy (mini CMA-ES per combo) is preserved as
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
 
@@ -185,12 +187,20 @@ def grid_search(
     chip_model: str = "6581",
     seed: int = 0,
     weights: Optional[dict] = None,
+    parallel: bool = True,
 ) -> List[OptimizerResult]:
     """Fast two-phase grid search: screen all combos, then refine top K.
 
     Phase 1 evaluates each discrete combo once with sensible mid-range
     continuous defaults (~42 evals).  Phase 2 runs full CMA-ES on the
     top *top_k* combos.
+
+    Parameters
+    ----------
+    parallel : bool
+        If True (default), Phase 2 runs the top-K CMA-ES refinements
+        concurrently using a thread pool.  Each refinement's internal
+        worker count is reduced so total CPU usage stays bounded.
 
     Returns results sorted ascending by ``best_fitness``.
     """
@@ -256,8 +266,16 @@ def grid_search(
     ]):
         screening_x0[i] = _SCREENING_DEFAULTS[key]
 
-    results: List[OptimizerResult] = []
-    for rank, (screen_fit, idx, combo) in enumerate(top_combos):
+    # Divide workers across parallel combos so total CPU stays bounded.
+    total_workers = n_workers or (os.cpu_count() or 1)
+    actual_top_k = len(top_combos)
+    run_parallel = parallel and actual_top_k > 1
+    if run_parallel:
+        per_combo_workers = max(1, total_workers // actual_top_k)
+    else:
+        per_combo_workers = n_workers  # preserve original value (None → auto)
+
+    def _refine_combo(rank: int, screen_fit: float, combo: dict) -> OptimizerResult:
         sw = combo["wt_sustain_waveform"]
         aw = combo["wt_attack_waveform"]
         fm = combo["filter_mode"]
@@ -270,7 +288,7 @@ def grid_search(
         fixed["chip_model"] = chip_model
 
         print(
-            f"[grid] Phase 2 [{rank+1}/{top_k}] refining: sustain={sw} "
+            f"[grid] Phase 2 [{rank+1}/{actual_top_k}] refining: sustain={sw} "
             f"attack={aw} filter={fm} test_bit={tb} "
             f"(screen={screen_fit:.4f}, budget={per_combo_budget})",
             flush=True,
@@ -283,7 +301,7 @@ def grid_search(
             weights=weights,
             budget=per_combo_budget,
             patience=patience,
-            n_workers=n_workers,
+            n_workers=per_combo_workers,
             seed=seed,
             work_dir=combo_dir,
             log_interval=100,
@@ -292,11 +310,42 @@ def grid_search(
         )
         res = opt.run()
         print(
-            f"[grid] Phase 2 [{rank+1}/{top_k}] -> fitness={res.best_fitness:.4f} "
+            f"[grid] Phase 2 [{rank+1}/{actual_top_k}] -> fitness={res.best_fitness:.4f} "
             f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
             flush=True,
         )
-        results.append(res)
+        return res
+
+    results: List[OptimizerResult] = []
+    if run_parallel:
+        print(
+            f"[grid] Phase 2: running {actual_top_k} combos in parallel "
+            f"({per_combo_workers} workers each)",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=actual_top_k) as executor:
+            futures = {
+                executor.submit(_refine_combo, rank, screen_fit, combo): rank
+                for rank, (screen_fit, _idx, combo) in enumerate(top_combos)
+            }
+            for future in as_completed(futures):
+                rank = futures[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception:
+                    logging.exception(
+                        "[grid] Phase 2 combo %d failed", rank + 1,
+                    )
+    else:
+        for rank, (screen_fit, idx, combo) in enumerate(top_combos):
+            try:
+                res = _refine_combo(rank, screen_fit, combo)
+                results.append(res)
+            except Exception:
+                logging.exception(
+                    "[grid] Phase 2 combo %d failed", rank + 1,
+                )
 
     results.sort(key=lambda r: r.best_fitness)
     return results
@@ -353,6 +402,7 @@ def grid_search_multi_note(
     seed: int = 0,
     weights: Optional[dict] = None,
     alpha: float = 0.25,
+    parallel: bool = True,
 ) -> List[OptimizerResult]:
     """Two-phase grid search using multi-note evaluation.
 
@@ -372,6 +422,9 @@ def grid_search_multi_note(
         Same semantics as :func:`grid_search`.
     alpha : float
         Aggregation parameter for multi-note fitness.
+    parallel : bool
+        If True (default), Phase 2 runs the top-K CMA-ES refinements
+        concurrently using a thread pool.
 
     Returns
     -------
@@ -438,8 +491,16 @@ def grid_search_multi_note(
     ]):
         screening_x0[i] = _SCREENING_DEFAULTS[key]
 
-    results: List[OptimizerResult] = []
-    for rank, (screen_fit, idx, combo) in enumerate(top_combos):
+    # Divide workers across parallel combos so total CPU stays bounded.
+    total_workers = n_workers or (os.cpu_count() or 1)
+    actual_top_k = len(top_combos)
+    run_parallel = parallel and actual_top_k > 1
+    if run_parallel:
+        per_combo_workers = max(1, total_workers // actual_top_k)
+    else:
+        per_combo_workers = n_workers  # preserve original value (None → auto)
+
+    def _refine_combo_mn(rank: int, screen_fit: float, combo: dict) -> OptimizerResult:
         sw = combo["wt_sustain_waveform"]
         aw = combo["wt_attack_waveform"]
         fm = combo["filter_mode"]
@@ -452,7 +513,7 @@ def grid_search_multi_note(
         fixed["chip_model"] = chip_model
 
         print(
-            f"[grid-mn] Phase 2 [{rank+1}/{top_k}] refining: sustain={sw} "
+            f"[grid-mn] Phase 2 [{rank+1}/{actual_top_k}] refining: sustain={sw} "
             f"attack={aw} filter={fm} test_bit={tb} "
             f"(screen={screen_fit:.4f}, budget={budget})",
             flush=True,
@@ -465,7 +526,7 @@ def grid_search_multi_note(
             alpha=alpha,
             budget=budget,
             patience=patience,
-            n_workers=n_workers,
+            n_workers=per_combo_workers,
             seed=seed,
             work_dir=combo_dir,
             log_interval=100,
@@ -473,11 +534,42 @@ def grid_search_multi_note(
         )
         res = opt.run()
         print(
-            f"[grid-mn] Phase 2 [{rank+1}/{top_k}] -> fitness={res.best_fitness:.4f} "
+            f"[grid-mn] Phase 2 [{rank+1}/{actual_top_k}] -> fitness={res.best_fitness:.4f} "
             f"evals={res.evaluations} time={res.wall_time_s:.1f}s",
             flush=True,
         )
-        results.append(res)
+        return res
+
+    results: List[OptimizerResult] = []
+    if run_parallel:
+        print(
+            f"[grid-mn] Phase 2: running {actual_top_k} combos in parallel "
+            f"({per_combo_workers} workers each)",
+            flush=True,
+        )
+        with ThreadPoolExecutor(max_workers=actual_top_k) as executor:
+            futures = {
+                executor.submit(_refine_combo_mn, rank, screen_fit, combo): rank
+                for rank, (screen_fit, _idx, combo) in enumerate(top_combos)
+            }
+            for future in as_completed(futures):
+                rank = futures[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception:
+                    logging.exception(
+                        "[grid-mn] Phase 2 combo %d failed", rank + 1,
+                    )
+    else:
+        for rank, (screen_fit, idx, combo) in enumerate(top_combos):
+            try:
+                res = _refine_combo_mn(rank, screen_fit, combo)
+                results.append(res)
+            except Exception:
+                logging.exception(
+                    "[grid-mn] Phase 2 combo %d failed", rank + 1,
+                )
 
     results.sort(key=lambda r: r.best_fitness)
     return results
