@@ -1,36 +1,78 @@
 {
-  "waveform": "pulse",
-  "attack": 4,
-  "decay": 9,
-  "sustain": 10,
-  "release": 4,
-  "pulse_width": 3810,
+  "waveform": "saw",
+  "attack": 3,
+  "decay": 8,
+  "sustain": 12,
+  "release": 12,
+  "pulse_width": 3211,
   "pw_table": null,
-  "filter_cutoff": 383,
+  "filter_cutoff": 1010,
   "filter_resonance": 4,
   "filter_mode": "lp",
   "filter_voice1": true,
   "ring_mod": false,
   "sync": false,
-  "frequency": 329.63,
-  "gate_frames": 44,
-  "release_frames": 10,
+  "frequency": 440.0,
+  "gate_frames": 21,
+  "release_frames": 155,
   "wavetable": null,
   "volume": 15,
   "chip_model": "6581",
-  "source_instrument": "Philharmonia Orchestra, acoustic guitar E4 forte (CC-BY-SA 3.0)",
-  "wt_attack_frames": 2,
-  "wt_attack_waveform": null,
-  "wt_sustain_waveform": "pulse",
-  "wt_use_test_bit": false,
-  "pw_start": 3810,
-  "pw_delta": -24,
-  "pw_min": 993,
-  "pw_max": 1286,
+  "source_instrument": "Philharmonia Orchestra acoustic guitar forte normal",
+  "wt_attack_frames": 5,
+  "wt_attack_waveform": "saw+triangle",
+  "wt_sustain_waveform": "saw",
+  "wt_use_test_bit": true,
+  "pw_start": 3211,
+  "pw_delta": 38,
+  "pw_min": 2705,
+  "pw_max": 2918,
   "pw_mode": "sweep",
-  "filter_cutoff_start": 383,
-  "filter_cutoff_end": 390,
-  "filter_sweep_frames": 65,
-  "fitness_score": 0.2944,
-  "version": 2
+  "filter_cutoff_start": 1010,
+  "filter_cutoff_end": 300,
+  "filter_sweep_frames": 8,
+  "reference_notes": [
+    {
+      "note": "E2",
+      "freq_hz": 82.41
+    },
+    {
+      "note": "G2",
+      "freq_hz": 98.0
+    },
+    {
+      "note": "Bb2",
+      "freq_hz": 116.54
+    },
+    {
+      "note": "Db3",
+      "freq_hz": 138.59
+    },
+    {
+      "note": "E3",
+      "freq_hz": 164.81
+    },
+    {
+      "note": "G3",
+      "freq_hz": 196.0
+    },
+    {
+      "note": "Bb3",
+      "freq_hz": 233.08
+    },
+    {
+      "note": "Db4",
+      "freq_hz": 277.18
+    },
+    {
+      "note": "E4",
+      "freq_hz": 329.63
+    },
+    {
+      "note": "G4",
+      "freq_hz": 392.0
+    }
+  ],
+  "fitness_score": 0.6767,
+  "version": 3
 }
