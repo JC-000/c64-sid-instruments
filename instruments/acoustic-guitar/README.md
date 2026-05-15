@@ -1,6 +1,15 @@
 # Acoustic Guitar (SID Instrument)
 
-A SID chip instrument patch: acoustic-guitar.
+A Commodore 64 SID chip instrument approximating the timbre of an
+acoustic guitar, optimized against a nylon-string guitar reference sample.
+
+Optimized variants are provided for both the MOS 6581 and MOS 8580 SID chips.
+
+## Source and Target
+
+| | |
+|---|---|
+| **Source instrument** | Acoustic guitar reference sample |
 
 ## Chip Variants
 
@@ -8,70 +17,68 @@ A SID chip instrument patch: acoustic-guitar.
 |---|---|---|
 | **Status** | available | available |
 | **Fitness** | 0.2944 | 0.2867 |
-| **Version** | 2 | 3 |
+| **Version** | v3 (pipeline v3) | v3 (pipeline v3) |
 
-### 6581 Parameters
+### MOS 6581
 
-| Parameter | Value |
-|---|---|
-| waveform | pulse |
-| attack | 4 |
-| decay | 9 |
-| sustain | 10 |
-| release | 4 |
-| pulse_width | 3810 |
-| pw_start | 3810 |
-| pw_delta | -24 |
-| pw_mode | sweep |
-| filter_cutoff | 383 |
-| filter_cutoff_start | 383 |
-| filter_cutoff_end | 390 |
-| filter_sweep_frames | 65 |
-| filter_resonance | 4 |
-| filter_mode | lp |
-| filter_voice1 | True |
-| wt_attack_waveform | None |
-| wt_sustain_waveform | pulse |
-| wt_attack_frames | 2 |
-| wt_use_test_bit | False |
-| volume | 15 |
+| Parameter        | Value           |
+|------------------|-----------------|
+| Sustain Waveform | pulse           |
+| Attack Waveform  | (same as sustain) |
+| Test Bit         | no              |
+| Attack           | 4 (38 ms)       |
+| Decay            | 9 (750 ms)      |
+| Sustain          | 10              |
+| Release          | 4 (114 ms)      |
+| PW Start         | 3810            |
+| PW Sweep         | -24/frame (sweep down, clamped) |
+| Filter Mode      | lowpass         |
+| Filter Cutoff    | 383 -> 390 over 65 frames (sweep up) |
+| Filter Resonance | 4 (of 15)       |
+| **Fitness**      | **0.2944**      |
 
-### 8580 Parameters
+### MOS 8580
 
-| Parameter | Value |
-|---|---|
-| waveform | pulse |
-| attack | 0 |
-| decay | 9 |
-| sustain | 7 |
-| release | 5 |
-| pulse_width | 2747 |
-| pw_start | 2747 |
-| pw_delta | 10 |
-| pw_mode | sweep |
-| filter_cutoff | 287 |
-| filter_cutoff_start | 287 |
-| filter_cutoff_end | 456 |
-| filter_sweep_frames | 99 |
-| filter_resonance | 0 |
-| filter_mode | lp |
-| filter_voice1 | True |
-| wt_attack_waveform | None |
-| wt_sustain_waveform | pulse |
-| wt_attack_frames | 4 |
-| wt_use_test_bit | True |
-| volume | 15 |
+| Parameter        | Value           |
+|------------------|-----------------|
+| Sustain Waveform | pulse           |
+| Attack Waveform  | (same as sustain) |
+| Test Bit         | yes (osc reset) |
+| Attack           | 0 (2 ms)        |
+| Decay            | 9 (750 ms)      |
+| Sustain          | 7               |
+| Release          | 5 (168 ms)      |
+| PW Start         | 2747            |
+| PW Sweep         | +10/frame (sweep up, clamped) |
+| Filter Mode      | lowpass         |
+| Filter Cutoff    | 287 -> 456 over 99 frames (sweep up) |
+| Filter Resonance | 0 (of 15)       |
+| **Fitness**      | **0.2867**      |
 
 ## Tags
 
 `acoustic-guitar`
 
+## Pipeline
+
+Generated with the v3 tracker-style pipeline featuring:
+- Wavetable sequences (test bit reset + attack waveform + sustain waveform)
+- Per-frame PW sweep
+- Per-frame filter cutoff sweep
+- ADSR-aware gate/release frame computation
+
 ## Files
 
-Each chip subdirectory contains:
-
-| File | Description |
-|---|---|
-| `params.json` | Machine-readable SID parameters |
-| `raw.asm` | ACME-includable assembly tables |
-| `goattracker.ins` | GoatTracker 2.x instrument binary |
+```
+acoustic-guitar/
+  6581/
+    params.json       - Machine-readable SID parameters (6581)
+    raw.asm           - ACME assembler include (6581)
+    goattracker.ins   - GoatTracker 2.x instrument file (6581)
+    sid_render.wav    - pyresidfp render (6581)
+  8580/
+    params.json       - Machine-readable SID parameters (8580)
+    raw.asm           - ACME assembler include (8580)
+    goattracker.ins   - GoatTracker 2.x instrument file (8580)
+    sid_render.wav    - pyresidfp render (8580)
+```
