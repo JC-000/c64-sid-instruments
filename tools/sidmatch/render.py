@@ -434,8 +434,15 @@ def render_pyresid(
         WritableRegister.Voice1_Sustain_Release, params.sr_byte()
     )
 
-    samples: List[int] = []
     frame_dur = timedelta(seconds=1.0 / PAL_FRAME_HZ)
+
+    # Pre-roll: clock 1 frame with volume/filter set but no gate to absorb
+    # the SID volume register click. Writing $D418 after reset causes a DC
+    # transient in the 6581 DAC (the 4-bit volume feeds through directly).
+    # This pre-roll lets that transient settle before real audio starts.
+    sid.clock(frame_dur)
+
+    samples: List[int] = []
 
     def _build_control(wf_mask: int, gate: bool) -> int:
         cb = wf_mask
