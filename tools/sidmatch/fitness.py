@@ -17,6 +17,8 @@ noisiness                  squared error of scalar noisiness
 fundamental                squared log2-ratio of the two f0 estimates
 adsr                       L1 over (attack, decay, sustain, release)
                            with per-term scaling
+envelope_delta             L2 between first-difference of envelopes
+                           (penalizes attack/decay slope mismatch)
 =========================  ===========================================
 
 All components are non-negative and normalized to be O(1) so the
@@ -36,12 +38,14 @@ from .features import FeatureVec
 DEFAULT_WEIGHTS: dict = {
     "envelope": 1.0,
     "harmonics": 2.0,
-    "spectral_centroid": 0.5,
-    "spectral_rolloff": 0.25,
-    "spectral_flatness": 0.25,
-    "noisiness": 0.5,
+    "spectral_centroid": 0.0,   # superseded by log_mel
+    "spectral_rolloff": 0.0,    # superseded by log_mel
+    "spectral_flatness": 0.0,   # superseded by log_mel
+    "noisiness": 0.0,           # superseded by log_mel
     "fundamental": 2.0,
     "adsr": 1.0,
+    "log_mel": 3.0,
+    "envelope_delta": 0.5,
 }
 
 
@@ -98,6 +102,42 @@ def _f0_log_ratio(a: float, b: float) -> float:
         return 4.0  # large penalty: pitched vs unpitched mismatch
     r = np.log2(a / b)
     return float(r * r)
+
+
+def _log_mel_mse(ref_mel: tuple | None, cand_mel: tuple | None) -> float:
+    """Multi-scale log-mel MSE, averaged across scales.
+
+    Each element of ref_mel / cand_mel is a 2-D array (n_mels, n_frames).
+    The shorter spectrogram along the time axis is zero-padded to match.
+    Returns 0.0 if either input is None (e.g. from extract_lite).
+    """
+    if ref_mel is None or cand_mel is None:
+        return 0.0
+    n_scales = min(len(ref_mel), len(cand_mel))
+    if n_scales == 0:
+        return 0.0
+    total = 0.0
+    for i in range(n_scales):
+        r = np.asarray(ref_mel[i], dtype=np.float64)
+        c = np.asarray(cand_mel[i], dtype=np.float64)
+        # Truncate both to the shorter time axis to avoid silence-padding
+        # artifacts inflating the MSE for near-identical signals.
+        t = min(r.shape[1], c.shape[1])
+        if t == 0:
+            continue
+        r = r[:, :t]
+        c = c[:, :t]
+        mse = float(np.mean((r - c) ** 2))
+        # Normalize by the mean variance of the two spectrograms so the
+        # component stays O(1) regardless of absolute energy scale.
+        # This makes it a fractional MSE (0 = identical, ~1 = very different).
+        var_r = float(np.var(r))
+        var_c = float(np.var(c))
+        norm = max((var_r + var_c) / 2.0, 1e-12)
+        # Clamp to avoid degenerate cases where near-zero variance
+        # inflates the normalized MSE (e.g. very short or silent audio).
+        total += min(mse / norm, 4.0)
+    return total / n_scales
 
 
 def _adsr_l1(ref: FeatureVec, cand: FeatureVec) -> float:
@@ -169,6 +209,11 @@ def distance(
         "noisiness": (ref.noisiness - cand.noisiness) ** 2,
         "fundamental": _f0_log_ratio(ref.fundamental_hz, cand.fundamental_hz),
         "adsr": _adsr_l1(ref, cand),
+        "log_mel": _log_mel_mse(ref.log_mel, cand.log_mel),
+        "envelope_delta": _envelope_l2(
+            np.diff(np.asarray(ref.amplitude_envelope, dtype=np.float64)),
+            np.diff(np.asarray(cand.amplitude_envelope, dtype=np.float64)),
+        ),
     }
 
     total = 0.0
