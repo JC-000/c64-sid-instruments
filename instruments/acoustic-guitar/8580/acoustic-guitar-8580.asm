@@ -41,10 +41,10 @@
 ; @meta filter_cutoff_start=187
 ; @meta filter_cutoff_end=50
 ; @meta filter_sweep_frames=100
-; @meta fitness_score=0.6985
-; @meta version=4
+; @meta fitness_score=0.0000
+; @meta version=5
 ; @meta chip_model=8580
-; @meta source_instrument=Philharmonia Orchestra acoustic guitar forte normal
+; @meta source_instrument=Philharmonia Orchestra (CC-BY-SA 3.0)
 ; @meta pw_table=
 ; @meta wavetable=
 
